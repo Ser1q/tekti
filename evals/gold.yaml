@@ -1,0 +1,374 @@
+# Gold set for the organisers' document "Уведомление о расходах по карте".
+#
+# STATUS: unreviewed. Written by one AI model (Claude) on 25 November 2026 from a
+# single reading. It may favour reviewers that reason the same way. Present any
+# score computed from it with that caveat.
+#
+# critical = true when the item is one of:
+#   (a) two statements in the document that cannot both hold;
+#   (b) a requirement for which no test with a definite expected result can be written;
+#   (c) something absent without which a feature the document itself states cannot be built.
+# This definition was fixed before any agent run and must not be changed afterwards.
+#
+# anchor / related are exact substrings of the document, used to match findings.
+# A finding matches an item when it cites text overlapping `anchor` (or `related`)
+# and describes the same defect; the criterion is a hint, not a strict key.
+
+document: local/requirements.md
+items:
+  # ---------------------------------------------------------------- Part A: rules
+  - id: G-01
+    part: A
+    anchor: "Месяц определяется по дате совершения покупки в Алматы"
+    related: "Февральский счётчик вырос на 4 000 ₸"
+    criterion: set_consistent
+    critical: true
+    note: Ф-2 assigns the month by purchase date; acceptance row 2 (bought 31 Jan 23:58, posted 1 Feb 00:03) counts it in February.
+
+  - id: G-02
+    part: A
+    anchor: "На карту приходится максимум один такой push за календарный месяц"
+    related: "следующее достижение вызывает push независимо от истории предыдущей настройки"
+    criterion: set_consistent
+    critical: true
+    note: Ф-3 caps pushes at one per month; Ф-4 demands a new push after a threshold change regardless of history.
+
+  - id: G-03
+    part: A
+    anchor: "в момент покупки"
+    related: "Сервис передаёт push на отправку в течение минуты после получения события"
+    criterion: set_consistent
+    critical: true
+    note: Goal promises notification at the moment of purchase; the NFR allows a minute, and Ф-2 counts only posted purchases, which may clear much later.
+
+  - id: G-04
+    part: A
+    anchor: "по дате совершения покупки в Алматы"
+    criterion: unambiguous
+    critical: true
+    note: Reads as either "purchases made in Almaty" or "date in the Almaty time zone".
+
+  - id: G-05
+    part: A
+    anchor: "Возврат уменьшает расходы месяца исходной покупки"
+    criterion: complete
+    critical: true
+    note: Undefined whether a refund that drops the total below the threshold re-arms the push, how partial refunds and refunds without a linked purchase are treated, and what happens for a refund into an already closed month.
+
+  - id: G-06
+    part: A
+    anchor: "Если она ниже нового порога"
+    criterion: complete
+    critical: true
+    note: Ф-4 covers only the case where the total is below the new threshold; lowering the threshold to or below the current total is undefined (push now, never, or next purchase).
+
+  - id: G-07
+    part: A
+    anchor: "Держатель активной карты KZT"
+    criterion: unambiguous
+    critical: false
+    note: The word "active" is undefined (blocked, expired, not yet activated); additional-card holders and multi-currency cards are not addressed.
+
+  - id: G-08
+    part: A
+    anchor: "Держатель активной карты KZT задаёт целый порог от 1 000 до 1 000 000 ₸ включительно. По умолчанию уведомление выключено."
+    criterion: singular
+    critical: false
+    note: Ф-1 combines eligibility, threshold range and default state.
+
+  - id: G-09
+    part: A
+    anchor: "В расходы входят проведённые покупки"
+    criterion: singular
+    critical: false
+    note: Ф-2 combines four rules (month definition, what counts, refunds, exclusions).
+
+  - id: G-10
+    part: A
+    anchor: "Переводы и снятие наличных исключаются"
+    criterion: complete
+    critical: false
+    note: Other operation types are not classified (fees, bill payments, quasi-cash, subscriptions, foreign-currency purchases and their conversion rate).
+
+  - id: G-11
+    part: A
+    anchor: "В расходы входят проведённые покупки"
+    criterion: unambiguous
+    critical: true
+    note: The word "проведённые" is undefined (authorised or cleared); it decides both the counter and the month, and conflicts with "в момент покупки".
+
+  - id: G-12
+    part: A
+    anchor: "клиент получает push"
+    criterion: complete
+    critical: false
+    note: Push text, language, behaviour when pushes are disabled on the device, and any fallback channel are not specified.
+
+  - id: G-13
+    part: A
+    anchor: "По умолчанию уведомление выключено"
+    criterion: complete
+    critical: false
+    note: Behaviour when the toggle is switched off and on within a month is undefined (does the sent flag reset, does accumulation continue while off).
+
+  - id: G-14
+    part: A
+    anchor: "личного бюджета"
+    related: "На карту приходится максимум один такой push"
+    criterion: set_consistent
+    critical: false
+    note: The goal speaks of a personal (client) budget while the rules are per card; a client with several cards is not addressed.
+
+  # ---------------------------------------------------------------- Part A: other sections
+  - id: G-15
+    part: A
+    anchor: "Сервис передаёт push на отправку в течение минуты после получения события"
+    criterion: verifiable
+    critical: true
+    note: No percentile or load, "the event" and its receiving point are not named, and it constrains hand-over, not delivery to the client.
+
+  - id: G-16
+    part: A
+    anchor: "### Нефункциональные требования"
+    criterion: set_complete
+    critical: false
+    note: Only one non-functional requirement; nothing on load, availability, security, retention or monitoring for a banking feature.
+
+  - id: G-17
+    part: A
+    anchor: "передать последние четыре цифры карты и сумму при достижении порога"
+    criterion: unambiguous
+    critical: false
+    note: Which amount is passed (purchase, monthly total or threshold) is not stated; showing card digits and amounts on a lock screen is not assessed.
+
+  - id: G-18
+    part: A
+    anchor: "сумму покупки в тиынах, признак отправки и порог в тенге"
+    criterion: set_consistent
+    critical: false
+    note: Amounts are stored in tiyn and the threshold in tenge with no conversion rule for the comparison.
+
+  - id: G-19
+    part: A
+    anchor: "Хранить идентификатор карты, месяц, идентификатор операции, сумму покупки в тиынах, признак отправки и порог в тенге"
+    criterion: complete
+    critical: true
+    note: Data needed by stated rules is absent, e.g. the enabled flag (Part B has `enabled`), purchase timestamp, operation type and link from a refund to its purchase.
+
+  - id: G-20
+    part: A
+    anchor: "признак отправки"
+    related: "следующее достижение вызывает push независимо от истории предыдущей настройки"
+    criterion: set_consistent
+    critical: false
+    note: A single sent flag per card and month cannot express a second push after a threshold change.
+
+  - id: G-21
+    part: A
+    anchor: "Повторная доставка одного события процессинга сохраняет исходный итог"
+    criterion: verifiable
+    critical: true
+    note: The phrase "исходный итог" is undefined (counter, push, both); no idempotency key or time window is given.
+
+  - id: G-22
+    part: A
+    anchor: "Приложение читает и сохраняет настройки через дочерний документ"
+    related: "| **REST type** | GET |"
+    criterion: set_complete
+    critical: true
+    note: Part A requires reading and saving settings; Part B defines a single method.
+
+  - id: G-23
+    part: A
+    anchor: "сумма за месяц"
+    criterion: set_complete
+    critical: true
+    note: The screen shows the monthly total but no interface supplies it to the application.
+
+  - id: G-24
+    part: A
+    anchor: "### Требования к интеграции"
+    criterion: set_complete
+    critical: false
+    note: The integration with card processing (event format, fields, delivery guarantees) is not specified anywhere.
+
+  - id: G-25
+    part: A
+    anchor: "При ошибке ввода сообщение появляется под полем"
+    criterion: verifiable
+    critical: false
+    note: Error texts and validation cases are not listed; behaviour of "Сохранить" with the toggle on and an empty field is undefined.
+
+  - id: G-26
+    part: A
+    anchor: "заполняются тестировщиками"
+    criterion: set_complete
+    critical: true
+    note: The testing section is a placeholder.
+
+  - id: G-27
+    part: A
+    anchor: "### Критерии приемки"
+    criterion: set_validatable
+    critical: true
+    note: Acceptance criteria cover three cases; nothing for refunds, threshold change, the one-push cap, default-off, range bounds, repeated events or the one-minute limit.
+
+  - id: G-28
+    part: A
+    anchor: "Расходы 48 500 ₸, порог 50 000 ₸"
+    criterion: complete
+    critical: false
+    note: Preconditions omit that the notification is enabled and that no push was sent this month.
+
+  - id: G-29
+    part: A
+    anchor: "Документ (версия/дата) в источнике не заполнен"
+    criterion: conforming
+    critical: false
+    note: No version or date; the review checklist is unmarked and the approvers table is empty.
+
+  - id: G-30
+    part: A
+    anchor: "Реализация задачи/проекта предусматривает схему отката решений"
+    criterion: set_complete
+    critical: false
+    note: The template asks for a rollback scheme and a security check; the document contains neither.
+
+  - id: G-31
+    part: A
+    anchor: "Мобильное приложение → сервис настроек. Карточный процессинг → учёт расходов → сервис push."
+    related: "Мобильный банк, карточный процессинг, сервис уведомлений"
+    criterion: set_consistent
+    critical: false
+    note: Components are named differently across sections (сервис уведомлений / сервис push; учёт расходов / сервис расходов).
+
+  - id: G-32
+    part: A
+    anchor: "#### Функциональные требования"
+    criterion: traceable
+    critical: false
+    note: Only Ф-1 to Ф-4 have identifiers; non-functional, data, integration and acceptance items have none and Part B does not reference Ф identifiers.
+
+  - id: G-33
+    part: A
+    anchor: "Проведение покупки → пересчёт расходов → проверка порога → при достижении отправка push → завершение."
+    criterion: set_complete
+    critical: false
+    note: The process covers only the happy path; refund, settings change and failure branches are absent.
+
+  # ---------------------------------------------------------------- Part B: REST API
+  - id: G-34
+    part: B
+    anchor: "Сохранение порога. Функциональные требования: чтение порога"
+    criterion: set_consistent
+    critical: true
+    note: The description says both saving and reading for the same method.
+
+  - id: G-35
+    part: B
+    anchor: "| **REST type** | GET |"
+    related: "Заменить настройку и вернуть результат сохранения"
+    criterion: correct
+    critical: true
+    note: A GET with query parameters changes state; parameters end up in logs and caches and the call may be repeated by intermediaries.
+
+  - id: G-36
+    part: B
+    anchor: "При отклонении суммы вернуть прежнее состояние и результат ERROR"
+    related: "**400.** Ответ в случае, если параметры запроса заполнены неверно."
+    criterion: set_consistent
+    critical: true
+    note: A rejected amount is returned as ERROR inside a 200 response by the example, while 400 is defined for invalid parameters.
+
+  - id: G-37
+    part: B
+    anchor: "Если результат 200 или 201 — успешный"
+    related: '{"result":"ERROR","message":"Проверьте сумму"}'
+    criterion: set_consistent
+    critical: true
+    note: 200 is declared successful but an ERROR body is shown under 200.
+
+  - id: G-38
+    part: B
+    anchor: "Если результат 200 или 201 — успешный"
+    related: "#### 200. Successful — Created"
+    criterion: set_consistent
+    critical: false
+    note: 201 is mentioned but never described; 200 is labelled "Created".
+
+  - id: G-39
+    part: B
+    anchor: "Для чужой карты возвращается 404, как и для отсутствующей карты."
+    related: "**403.** Ответ в случае, если на указанный ресурс доступ запрещен."
+    criterion: set_consistent
+    critical: true
+    note: 403 is listed as a status, yet its own section says 404 is returned; 404 is missing from the status list and no case for 403 remains.
+
+  - id: G-40
+    part: B
+    anchor: "| `amount` | integer | 32 bit | Да | 1 000–1 000 000 | Порог в тенге | `limit_kzt` |"
+    related: "| `amount` | string | При успехе | Порог в тенге | `limit_kzt` |"
+    criterion: set_consistent
+    critical: false
+    note: The fields `amount` and `enabled` are integers in the request and strings in the response.
+
+  - id: G-41
+    part: B
+    anchor: "* **Content-Type:** `application/json` ."
+    related: "* Тело не используется."
+    criterion: set_consistent
+    critical: false
+    note: A content type is declared for a request with no body.
+
+  - id: G-42
+    part: B
+    anchor: "При отклонении суммы вернуть прежнее состояние и результат ERROR"
+    related: '{"result":"ERROR","message":"Проверьте сумму"}'
+    criterion: set_consistent
+    critical: false
+    note: The rule says the previous state is returned; the ERROR example carries no amount or enabled.
+
+  - id: G-43
+    part: B
+    anchor: '{"message":"Некорректный запрос"}'
+    related: "| `result` | string | OK / ERROR | Исход сохранения | — |"
+    criterion: set_consistent
+    critical: false
+    note: Error bodies for 4xx and 5xx contain only `message`, without the `result` field the response table defines; no machine-readable error code.
+
+  - id: G-44
+    part: B
+    anchor: "Проверить сумму и переключатель"
+    criterion: complete
+    critical: true
+    note: Validation is not defined, e.g. whether `amount` must be valid when `enabled=0`, and what is stored for a client who never set a threshold.
+
+  - id: G-45
+    part: B
+    anchor: "Проверить принадлежность карты клиенту"
+    related: "Держатель активной карты KZT"
+    criterion: set_complete
+    critical: false
+    note: The method checks ownership only; the response for an inactive or non-KZT card (required by Ф-1) is not defined.
+
+  - id: G-46
+    part: B
+    anchor: "Dev: `/alerts/saveLimit` . Prod: —"
+    criterion: complete
+    critical: false
+    note: Production address and Swagger are blank; no versioning in the path.
+
+  - id: G-47
+    part: B
+    anchor: "Изменение порога сохраняет накопленные расходы"
+    related: "При изменении порога накопленная сумма сохраняется"
+    criterion: modifiable
+    critical: false
+    note: The same rule is stated in both parts and can drift apart.
+
+  - id: G-48
+    part: B
+    anchor: "Целое число тенге, обе границы включены"
+    criterion: complete
+    critical: false
+    note: The rule refers to bounds without stating them; it depends on the parameter table elsewhere.

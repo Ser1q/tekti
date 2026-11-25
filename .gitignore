@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+# organisers' material and local run outputs: handed in beside the repository, not inside it
+local/
+runs/
