@@ -152,7 +152,9 @@ DEFAULT_QUESTION_WRITER = DEFAULT_BENCH[0]
 # Measured board run runs/vendors-2 (26 Nov 2026, these defaults; Gemini 4 Hydrogen did not answer the start-up
 # check, so Gemini 3.5 Flash-Lite took seat 3; panel prompt without the "worksheet" field, see the report):
 #   OpenAI gpt-6.1-terra $0.40, Anthropic claude-haiku-5-5 $0.08, Google gemini-3.5-flash-lite $0.05
-#   -> $0.52 per board run, 351 s wall, 14 of 15 panel reviews valid. With Hydrogen in seat 3, Google adds
+#   -> $0.52 per board run, 351 s wall, 14 of 15 panel reviews valid.
+# Measured board run runs/vendors-7 (26 Nov 2026, Gemini 4 Carbon in seat 3): $1.54 (Google $0.86, OpenAI $0.61,
+#   Anthropic $0.07), 443 s wall, 15 of 15 panel reviews valid, 3 Carbon challenges retried on Flash-Lite. With Hydrogen in seat 3, Google adds
 #   about $0.30 (estimate from single calls).
 #
 # Prompt caching is not enabled: the 15 panel calls share the document turn but each angle's system
