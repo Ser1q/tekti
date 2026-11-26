@@ -392,7 +392,12 @@ def test_render_full_report_structure_counts_and_evidence() -> None:
     assert "Архитектор" in sec5
     assert "Аналитик" in sec5
     assert "«integer»; «string»" in sec5
-    assert "документ не сужает выбор до фиксированных вариантов" in sec5
+    # The question on the critical finding is shown in full; the other one is a table row.
+    assert "Всего вопросов: 2. Ключевые (1)" in sec5
+    assert "**Кому адресованы:**" in sec5
+    assert "### Q-001 (приоритет 1)" in sec5 and "### Q-002" not in sec5
+    assert "### Остальные вопросы" in sec5
+    assert "| Q-002 | Какие коды ошибок" in sec5 and "| Аналитик | — | F-003 |" in sec5
 
     # Section 6: Summary counts & critical list (first quote location only)
     sec6 = md.split("## 6. Сводка")[1].split("## 7. Итог")[0]

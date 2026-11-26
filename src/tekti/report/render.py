@@ -574,8 +574,7 @@ def _render_segmentation(run: Run, ordered_reqs: list[tuple[Requirement, bool]])
     lines = ["## 2. Как агент нарезал требования", ""]
     if not ordered_reqs:
         lines.append(
-            f"Из документа «{run.document.name}» (проверено блоков: {len(run.document.blocks)}) "
-            "выделено 0 требований."
+            f"Из документа «{run.document.name}» (проверено блоков: {len(run.document.blocks)}) выделено 0 требований."
         )
         return lines
 
@@ -735,32 +734,73 @@ def _render_set_level(
     return lines
 
 
-def _render_questions(questions: list[Question], confirmed_count: int) -> list[str]:
+KEY_QUESTIONS_MAX = 20  # questions shown in full; the rest go into one compact table
+
+
+def _render_questions(questions: list[Question], confirmed: list[Finding]) -> list[str]:
+    """Section 5. Questions that close a critical finding are shown in full (at most
+    KEY_QUESTIONS_MAX, by priority); every other question is one row of a table. Nothing is left out."""
     lines = ["## 5. Уточняющие вопросы", ""]
     if not questions:
         lines.append(
-            f"По результатам анализа {confirmed_count} подтверждённых замечаний "
-            "уточняющие вопросы не сформированы (0)."
+            f"По результатам анализа {len(confirmed)} подтверждённых замечаний уточняющие вопросы не сформированы (0)."
         )
         return lines
 
     ordered = sorted(questions, key=lambda q: (q.priority, q.id))
-    for idx, q in enumerate(ordered):
-        if idx > 0:
-            lines.append("")
+    critical_ids = {f.id for f in confirmed if f.severity == Severity.CRITICAL}
+    key = [q for q in ordered if critical_ids.intersection(q.finding_ids)][:KEY_QUESTIONS_MAX]
+    if not key:  # no critical findings: the highest-priority questions are the key ones
+        key = ordered[: min(KEY_QUESTIONS_MAX, len(ordered))]
+    key_ids = {q.id for q in key}
+    rest = [q for q in ordered if q.id not in key_ids]
+
+    if rest:
+        lines.append(
+            f"Всего вопросов: {len(ordered)}. Ключевые ({len(key)}) закрывают критичные замечания и приведены "
+            f"полностью; остальные ({len(rest)}) собраны в таблицу в конце раздела."
+        )
+    else:
+        lines.append(f"Всего вопросов: {len(ordered)}.")
+    lines.append("")
+    lines.append("**Кому адресованы:**")
+    lines.append("")
+    by_role: dict[Role, list[str]] = {}
+    for q in ordered:
+        by_role.setdefault(q.addressee, []).append(q.id)
+    for role, ids in sorted(by_role.items(), key=lambda kv: -len(kv[1])):
+        lines.append(f"- {ROLE_RU[role]} ({len(ids)}): {', '.join(ids)}")
+
+    for q in key:
+        lines.append("")
         lines.append(f"### {q.id} (приоритет {q.priority})")
         lines.append("")
         lines.append(f"- **Вопрос:** {_normalize_req_ids_in_text(q.text)}")
         lines.append(f"- **Адресат:** {ROLE_RU[q.addressee]}")
         lines.append(f"- **Что блокирует:** {_normalize_req_ids_in_text(q.blocks)}")
-        if q.options:
-            opts = "; ".join(f"«{_normalize_req_ids_in_text(opt)}»" for opt in q.options)
-            lines.append(f"- **Варианты ответа:** {opts}")
-        else:
-            lines.append("- **Варианты ответа:** документ не сужает выбор до фиксированных вариантов")
+        lines.append(f"- **Варианты ответа:** {_question_options(q)}")
         settled = ", ".join(q.finding_ids) if q.finding_ids else "не указаны"
         lines.append(f"- **Закрываемые замечания:** {settled}")
+
+    if rest:
+        lines.append("")
+        lines.append("### Остальные вопросы")
+        lines.append("")
+        lines.append("| № | Вопрос | Адресат | Варианты ответа | Замечания |")
+        lines.append("| :--- | :--- | :--- | :--- | :--- |")
+        for q in rest:
+            options = _question_options(q) if q.options else "—"
+            lines.append(
+                f"| {q.id} | {_table_text(_normalize_req_ids_in_text(q.text))} | {ROLE_RU[q.addressee]} "
+                f"| {_table_text(options)} | {', '.join(q.finding_ids) or '—'} |"
+            )
     return lines
+
+
+def _question_options(q: Question) -> str:
+    if q.options:
+        return "; ".join(f"«{_normalize_req_ids_in_text(opt)}»" for opt in q.options)
+    return "документ не сужает выбор до фиксированных вариантов"
 
 
 def _render_summary(
@@ -822,8 +862,7 @@ def _render_summary(
             loc = _first_quote_location(f, blocks, blocks_by_id)
             title = _normalize_req_ids_in_text(_collapse_ws(f.title))
             lines.append(
-                f"- **{f.id}** ({NAME_RU[f.criterion]}): {title} — "
-                f"требования: {req_part}; расположение: {loc}"
+                f"- **{f.id}** ({NAME_RU[f.criterion]}): {title} — требования: {req_part}; расположение: {loc}"
             )
     return lines
 
@@ -861,9 +900,7 @@ def _render_verdict(
 
     if not v.ready_for_testing:
         test_blockers = [
-            f
-            for f in confirmed
-            if f.severity == Severity.MAJOR and f.criterion in _TESTING_BLOCKING_CRITERIA
+            f for f in confirmed if f.severity == Severity.MAJOR and f.criterion in _TESTING_BLOCKING_CRITERIA
         ]
         if test_blockers:
             lines.append("")
@@ -893,7 +930,7 @@ def render(run: Run) -> str:
         _render_segmentation(run, ordered_reqs),
         _render_per_requirement(run, ordered_reqs, confirmed, blocks_by_id, reqs_by_id),
         _render_set_level(run, confirmed, blocks_by_id, reqs_by_id),
-        _render_questions(run.questions, len(confirmed)),
+        _render_questions(run.questions, confirmed),
         _render_summary(run, confirmed, blocks_by_id, reqs_by_id),
         _render_verdict(run, confirmed, blocks_by_id),
     ]

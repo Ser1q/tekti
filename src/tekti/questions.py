@@ -413,9 +413,12 @@ async def write(
 
     def rank(q: _Q) -> tuple:
         fs = [valid[i] for i in q.finding_ids]
-        crit = any(f.severity == Severity.CRITICAL for f in fs)
+        crit = sum(f.severity == Severity.CRITICAL for f in fs)
+        major = sum(f.severity == Severity.MAJOR for f in fs)
         reqs = {r for f in fs for r in f.requirement_ids}
-        return (0 if crit else 1, -len(fs), -len(reqs), min(order[i] for i in q.finding_ids))
+        # Most blocking first: critical findings settled, then major ones. Minor findings add no
+        # weight, so a question that bundles form defects does not outrank a real blocker.
+        return (-crit, -major, -len(reqs), min(order[i] for i in q.finding_ids))
 
     qs.sort(key=rank)
     out: list[Question] = []
