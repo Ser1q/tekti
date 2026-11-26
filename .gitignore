@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
-# organisers' material and local run outputs: handed in beside the repository, not inside it
+# organisers' material and local run outputs stay out of the repository;
+# the one submitted report and its run data are in submission/
 local/
 runs/
