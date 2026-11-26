@@ -24,7 +24,7 @@ from tekti.contracts import (
     Severity,
 )
 from tekti.llm import LLMError, ModelSpec
-from tekti.prompts.challenge import ChallengeAnswer, MergeAnswer, PairAnswer
+from tekti.prompts.challenge import ChallengeAnswer, FinalDedupAnswer, FinalGroup, MergeAnswer, PairAnswer
 
 LINES = [
     (BlockKind.HEADING, "# Бонусная программа", []),
@@ -128,17 +128,20 @@ def make_cfg(panel=None):
 class FakeBackend:
     """Routes by schema; records (model_id, schema name, user) for every call."""
 
-    def __init__(self, challenge=None, merge=None, pair=None):
+    def __init__(self, challenge=None, merge=None, pair=None, final=None):
         self.calls: list[tuple[str, str, str]] = []
         self.challenge = challenge or (
             lambda model, user: ChallengeAnswer(reasoning="Дефект подтверждён.", upheld=True)
         )
         self.merge = merge or (lambda model, user: MergeAnswer(groups=[]))
         self.pair = pair or (lambda model, user: PairAnswer(same=[]))
+        self.final = final or (lambda model, user: FinalDedupAnswer(groups=[]))
 
     async def complete(self, model, *, system, user, schema, max_tokens):
         self.calls.append((model.model_id, schema.__name__, user))
-        handler = {ChallengeAnswer: self.challenge, PairAnswer: self.pair}.get(schema, self.merge)
+        handler = {ChallengeAnswer: self.challenge, PairAnswer: self.pair, FinalDedupAnswer: self.final}.get(
+            schema, self.merge
+        )
         out = handler(model, user)
         if isinstance(out, Exception):
             raise out
@@ -146,6 +149,9 @@ class FakeBackend:
 
     def by_schema(self, name: str) -> list[tuple[str, str, str]]:
         return [c for c in self.calls if c[1] == name]
+
+    def without_final(self) -> list[tuple[str, str, str]]:
+        return [c for c in self.calls if c[1] != "FinalDedupAnswer"]
 
 
 @pytest.fixture
@@ -221,7 +227,7 @@ async def test_quote_check_rejects_and_drops_evidence(backend):
     assert [e.quote for e in fast.evidence] == [Q_FAST]
     assert fast.evidence[0].block_id == "B-0007"
     assert adjudicate.last_stats["evidence_dropped"] == 2
-    assert backend.calls == []  # everything raised by rules: no challenge
+    assert backend.without_final() == []  # everything raised by rules: no challenge
 
 
 async def test_quote_without_markup_is_recovered_exactly(backend):
@@ -257,7 +263,7 @@ async def test_folding_merges_correct_with_set_consistent_and_confirms_by_two_fa
     assert f.title == "П-2 и П-3 противоречат друг другу"  # equal evidence: longer explanation wins
     assert f.requirement_ids == ["R-002", "R-003"]
     assert len(f.evidence) == 2
-    assert backend.calls == []  # two families: no challenge, overlapping quotes: no merge call
+    assert backend.without_final() == []  # two families: no challenge, overlapping quotes: no merge call
 
 
 async def test_complete_folds_to_set_complete_without_requirements(backend):
@@ -602,7 +608,7 @@ async def test_parent_level_and_child_level_conflict_merge(backend):
     assert len(confirmed) == 1
     assert confirmed[0].requirement_ids == ["R-003", "R-006"]
     assert confirmed[0].families == 2
-    assert backend.calls == []
+    assert backend.without_final() == []
 
 
 async def test_cross_class_needs_equal_requirements_and_mutual_evidence(backend):
@@ -715,3 +721,158 @@ async def test_pair_merges_do_not_chain(backend):
     assert len(confirmed) == 2
     assert adjudicate.last_stats["pairs_blocked_chain"] == 1
     assert len(adjudicate.last_merge_log) == 1
+
+
+# --------------------------------------------------------------------------- final dedup pass
+
+
+def _final_all(model, user):
+    n = sum(1 for line in user.splitlines() if line.startswith("["))
+    return FinalDedupAnswer(groups=[FinalGroup(indices=list(range(n)), reason="одна правка: заменить метод")])
+
+
+async def test_final_pass_merges_cross_class_group_and_never_lowers(backend):
+    backend.final = _final_all
+    raw = [
+        rf("gpt", Criterion.SET_CONSISTENT, Severity.CRITICAL, ["R-008", "R-009"], [METHOD, STEP1], title="GET меняет"),
+        rf("claude", Criterion.APPROPRIATE, Severity.MAJOR, ["R-008"], [METHOD], title="GET вместо POST"),
+    ]
+    confirmed, _ = await run_norm(raw)
+    assert len(backend.by_schema("FinalDedupAnswer")) == 1
+    assert len(confirmed) == 1
+    f = confirmed[0]
+    assert (f.criterion, f.severity, f.title) == (Criterion.SET_CONSISTENT, Severity.CRITICAL, "GET меняет")
+    assert f.requirement_ids == ["R-008", "R-009"]
+    assert f.families == 2
+    assert backend.by_schema("ChallengeAnswer") == []  # combined families: no challenge needed
+    assert adjudicate.last_stats["final_merges"] == 1
+    assert any("final:" in line and "заменить метод" in line for line in adjudicate.last_merge_log)
+
+
+async def test_final_pass_keeps_conflict_and_gap_apart_without_model_group(backend):
+    raw = [
+        rf("gpt", Criterion.SET_CONSISTENT, Severity.CRITICAL, ["R-003", "R-006"], [P3_CAP, P4_ANY], title="Конфликт"),
+        rf("claude", Criterion.SET_CONSISTENT, Severity.CRITICAL, ["R-003", "R-006"], [P3_CAP, P4_ANY], title="К2"),
+        rf("grok", Criterion.COMPLETE, Severity.MAJOR, ["R-003"], [P3_CAP], title="Не определён сброс"),
+    ]
+    confirmed, _ = await run_norm(raw)
+    assert len(backend.by_schema("FinalDedupAnswer")) == 1
+    assert sorted((f.criterion.value, f.severity.value) for f in confirmed) == [
+        ("complete", "major"),
+        ("set_consistent", "critical"),
+    ]
+
+
+async def test_final_pass_skipped_on_failure(backend):
+    backend.final = lambda model, user: LLMError("down")
+    raw = [
+        rf("gpt", Criterion.SET_CONSISTENT, Severity.CRITICAL, ["R-008", "R-009"], [METHOD, STEP1]),
+        rf("claude", Criterion.APPROPRIATE, Severity.MAJOR, ["R-008"], [METHOD]),
+    ]
+    confirmed, _ = await run_norm(raw)
+    assert len(confirmed) == 2
+    assert adjudicate.last_stats["final_calls_failed"] == 1
+
+
+# --------------------------------------------------------------------------- two-vote rejection
+
+
+def _by_model(answers):
+    def handler(model, user):
+        return answers[model.model_id]
+
+    return handler
+
+
+async def test_single_rejection_then_uphold_confirms(backend):
+    backend.challenge = _by_model(
+        {
+            "gpt": ChallengeAnswer(reasoning="Нет дефекта.", upheld=False, severity=Severity.MINOR),
+            "grok": ChallengeAnswer(reasoning="Дефект есть: «быстро» не измеримо.", upheld=True),
+        }
+    )
+    raw = [rf("claude", Criterion.UNAMBIGUOUS, Severity.MAJOR, ["R-004"], [Q_FAST])]
+    confirmed, rejected = await merge(make_doc(), make_reqs(), raw, make_cfg())
+    assert [c[0] for c in backend.by_schema("ChallengeAnswer")] == ["gpt", "grok"]  # second family differs
+    assert rejected == []
+    f = confirmed[0]
+    assert f.severity == Severity.MAJOR  # only one challenger proposed a lower severity
+    assert f.challenge.challenger == "grok" and f.challenge.upheld
+    assert "«быстро»" in f.challenge.reasoning
+    assert adjudicate.last_stats["second_opinions"] == 1
+    assert adjudicate.last_stats["rejections_overturned"] == 1
+    assert len(adjudicate.last_overturned) == 1
+
+
+async def test_overturn_lowers_severity_only_when_both_agree(backend):
+    backend.challenge = _by_model(
+        {
+            "gpt": ChallengeAnswer(reasoning="Нет.", upheld=False, severity=Severity.MINOR),
+            "grok": ChallengeAnswer(reasoning="Да, но мелочь.", upheld=True, severity=Severity.MINOR),
+        }
+    )
+    raw = [rf("claude", Criterion.UNAMBIGUOUS, Severity.MAJOR, ["R-004"], [Q_FAST])]
+    confirmed, _ = await merge(make_doc(), make_reqs(), raw, make_cfg())
+    assert confirmed[0].severity == Severity.MINOR
+
+
+async def test_two_rejections_reject(backend):
+    backend.challenge = _by_model(
+        {
+            "gpt": ChallengeAnswer(reasoning="Это пожелание.", upheld=False),
+            "grok": ChallengeAnswer(reasoning="Документ этого не обещал.", upheld=False),
+        }
+    )
+    raw = [rf("claude", Criterion.SET_COMPLETE, Severity.MAJOR, [], ["# Бонусная программа"], title="Нет SMS")]
+    confirmed, rejected = await merge(make_doc(), make_reqs(), raw, make_cfg())
+    assert confirmed == []
+    r = rejected[0]
+    assert "пожелание" in r.reject_reason and "не обещал" in r.reject_reason
+    assert r.challenge.challenger == "gpt, grok" and not r.challenge.upheld
+
+
+async def test_single_family_config_keeps_single_rejection(backend):
+    backend.challenge = lambda model, user: ChallengeAnswer(reasoning="Нет дефекта.", upheld=False)
+    panel = [ModelSpec(family="anthropic", model_id="claude")]
+    raw = [rf("claude", Criterion.UNAMBIGUOUS, Severity.MAJOR, ["R-004"], [Q_FAST])]
+    confirmed, rejected = await merge(make_doc(), make_reqs(), raw, make_cfg(panel))
+    assert confirmed == [] and len(rejected) == 1
+    assert len(backend.by_schema("ChallengeAnswer")) == 1
+    assert adjudicate.last_stats["second_opinions"] == 0
+
+
+async def test_final_conflict_plus_gap_needs_a_second_model(backend):
+    # The final pass groups a conflict with an "undefined case" about one of its sentences;
+    # a model of another family must agree, otherwise they stay apart.
+    backend.final = _final_all
+    raw = [
+        rf("gpt", Criterion.SET_CONSISTENT, Severity.CRITICAL, ["R-003", "R-006"], [P3_CAP, P4_ANY], title="Конфликт"),
+        rf("claude", Criterion.SET_CONSISTENT, Severity.CRITICAL, ["R-003", "R-006"], [P3_CAP, P4_ANY], title="К2"),
+        rf("grok", Criterion.COMPLETE, Severity.MAJOR, ["R-003"], [P3_CAP], title="Не определён сброс"),
+    ]
+    confirmed, _ = await run_norm(raw)
+    pair_calls = backend.by_schema("PairAnswer")
+    assert [c[0] for c in pair_calls] == ["gpt"]  # verifier: not the grouping model's family
+    assert len(confirmed) == 2
+    assert adjudicate.last_stats["final_rejected_by_verifier"] == 1
+
+    backend.calls.clear()
+    backend.pair = lambda model, user: PairAnswer(same=[0])
+    confirmed, _ = await run_norm(raw)
+    assert len(confirmed) == 1
+    assert (confirmed[0].criterion, confirmed[0].severity) == (Criterion.SET_CONSISTENT, Severity.CRITICAL)
+
+
+async def test_final_merge_tie_prefers_the_conflict(backend):
+    backend.final = _final_all
+    backend.pair = lambda model, user: PairAnswer(same=[0])
+    raw = [
+        rf("gpt", Criterion.SET_CONSISTENT, Severity.MAJOR, ["R-003", "R-006"], [P3_CAP, P4_ANY], title="Конфликт"),
+        rf("claude", Criterion.COMPLETE, Severity.MAJOR, ["R-003"], [P3_CAP, "## Правила", "## API"], title="Пробел"),
+        rf("grok", Criterion.COMPLETE, Severity.MAJOR, ["R-003"], [P3_CAP], title="Пробел 2"),
+    ]
+    confirmed, _ = await run_norm(raw)
+    assert len(confirmed) == 1
+    assert (confirmed[0].criterion, confirmed[0].title) == (Criterion.SET_CONSISTENT, "Конфликт")
+    assert confirmed[0].requirement_ids == ["R-003", "R-006"]
+    assert confirmed[0].families == 3  # the gap had more families; the conflict still leads

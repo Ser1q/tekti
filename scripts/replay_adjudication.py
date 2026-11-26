@@ -65,6 +65,13 @@ def summarize(label: str, run: Run) -> None:
     print(f"individual-criterion findings with exactly one id: {len(one_id)}/{len(individual)}")
     print("id count per finding:", dict(sorted(Counter(len(f.requirement_ids) for f in fs).items())))
     print("findings per requirement:", " ".join(f"{r}:{n}" for r, n in sorted(per_req.items())))
+    print("critical:")
+    for f in fs:
+        if f.severity.value == "critical":
+            print(f"  {f.id} {f.criterion.value} {','.join(f.requirement_ids) or '-'} fam={f.families} {f.title}")
+    print("rejected:")
+    for f in run.rejected:
+        print(f"  {f.id} {f.severity.value} {f.criterion.value} {f.title}")
     dups = likely_duplicates(fs)
     print(f"strongly overlapping confirmed pairs: {len(dups)}")
     for a, b in dups:
@@ -86,6 +93,8 @@ async def replay(run: Run, no_llm: bool) -> Run:
     print("adjudication stats:", adjudicate.last_stats, file=sys.stderr)
     for line in adjudicate.last_merge_log:
         print("  merged by model:", line, file=sys.stderr)
+    for line in adjudicate.last_overturned:
+        print("  rejection overturned:", line, file=sys.stderr)
     qs = await questions.write(
         confirmed, run.requirements, cfg, drafts=dict(adjudicate.last_question_drafts), doc=run.document
     )

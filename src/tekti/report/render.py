@@ -362,19 +362,29 @@ def _format_req_ref(req_id: str, reqs_by_id: dict[str, Requirement]) -> str:
     return req_id
 
 
-def _finding_locations_summary(
+def _first_quote_location(
     finding: Finding,
     blocks: list[Block],
     blocks_by_id: dict[str, Block],
+    *,
+    brief: bool = False,
 ) -> str:
     if not finding.evidence:
         return "место не указано"
-    seen: list[str] = []
-    for ev in finding.evidence:
-        loc = _format_evidence_location(ev, blocks, blocks_by_id)
-        if loc not in seen:
-            seen.append(loc)
-    return "; ".join(seen)
+    ev = finding.evidence[0]
+    if not brief:
+        return _format_evidence_location(ev, blocks, blocks_by_id)
+    block = _find_block_for_quote(ev.quote, ev.block_id, blocks, blocks_by_id)
+    if block is not None:
+        sec_parts = [_clean_heading(p) for p in block.section_path if _clean_heading(p)]
+        sec = " › ".join(sec_parts[-2:]) if len(sec_parts) >= 2 else (sec_parts[0] if sec_parts else "Начало документа")
+        loc_parts = [sec, _line_label(block)]
+        if block.page is not None:
+            loc_parts.append(f"стр. {block.page}")
+        return ", ".join(loc_parts)
+    if ev.block_id:
+        return f"блок [{ev.block_id}] (не найден в тексте документа)"
+    return "место в документе не определено"
 
 
 def _render_finding_details(
@@ -386,8 +396,10 @@ def _render_finding_details(
     side_by_side_table: bool,
     show_requirements: bool,
 ) -> list[str]:
+    title = _normalize_req_ids_in_text(_collapse_ws(finding.title))
+    explanation = _normalize_req_ids_in_text(finding.explanation)
     lines: list[str] = [
-        f"#### {finding.id}. {_collapse_ws(finding.title)}",
+        f"#### {finding.id}. {title}",
         "",
         f"- **Критерий:** {NAME_RU[finding.criterion]} ({SOURCE[finding.criterion]})",
         f"- **Критичность:** {SEVERITY_RU[finding.severity]}",
@@ -399,7 +411,7 @@ def _render_finding_details(
             req_labels = "весь документ"
         lines.append(f"- **Затронутые требования:** {req_labels}")
 
-    lines.append(f"- **Пояснение:** {finding.explanation}")
+    lines.append(f"- **Пояснение:** {explanation}")
     raisers = ", ".join(_format_raiser(r) for r in finding.raised_by) if finding.raised_by else "не указаны"
     lines.append(f"- **Подтверждение:** семейств моделей — {finding.families}; источники: {raisers}")
 
@@ -412,7 +424,11 @@ def _render_finding_details(
                 verdict_text = "подтверждено"
         else:
             verdict_text = "отклонено"
-        lines.append(f"- **Перекрёстная проверка ({ch.challenger}):** {verdict_text} — {ch.reasoning}")
+        reasoning_short = _first_two_sentences(_normalize_req_ids_in_text(ch.reasoning))
+        if reasoning_short:
+            lines.append(f"- **Перекрёстная проверка ({ch.challenger}):** {verdict_text} — {reasoning_short}")
+        else:
+            lines.append(f"- **Перекрёстная проверка ({ch.challenger}):** {verdict_text}")
 
     if not finding.evidence:
         lines.append("- **Цитаты и расположение:** не приведены.")
@@ -448,10 +464,81 @@ def _render_finding_details(
     return lines
 
 
-def _render_passport(run: Run) -> list[str]:
+def _render_first_screen_summary(
+    run: Run,
+    confirmed: list[Finding],
+    blocks_by_id: dict[str, Block],
+) -> list[str]:
+    v = run.verdict
+    sev_counts = Counter(f.severity for f in confirmed)
+    lines = [
+        "### Краткий итог на первом экране",
+        "",
+        f"- **Готовность к разработке:** {'Да' if v.ready_for_development else 'Нет'}",
+        f"- **Готовность к тестированию:** {'Да' if v.ready_for_testing else 'Нет'}",
+        (
+            f"- **Подтверждено замечаний:** {len(confirmed)} "
+            f"(критичных — {sev_counts[Severity.CRITICAL]}, "
+            f"существенных — {sev_counts[Severity.MAJOR]}, "
+            f"незначительных — {sev_counts[Severity.MINOR]})"
+        ),
+    ]
+
+    confirmed_by_id = {f.id: f for f in confirmed}
+    critical_items: list[Finding] = []
+    seen_crit: set[str] = set()
+    for fid in v.fix_first:
+        f = confirmed_by_id.get(fid)
+        if f is not None and f.id not in seen_crit:
+            critical_items.append(f)
+            seen_crit.add(f.id)
+    for f in confirmed:
+        if f.severity == Severity.CRITICAL and f.id not in seen_crit:
+            critical_items.append(f)
+            seen_crit.add(f.id)
+    critical_items = critical_items[:10]
+
+    blocks = run.document.blocks
+    total_crit = sev_counts[Severity.CRITICAL]
+    if not critical_items:
+        lines.append("- **Критичных дефектов: 0**")
+    else:
+        crit_header = (
+            f"- **Критичные дефекты (показаны {len(critical_items)} из {total_crit}):**"
+            if total_crit > len(critical_items)
+            else "- **Критичные дефекты:**"
+        )
+        lines.append(crit_header)
+        for f in critical_items:
+            title = _normalize_req_ids_in_text(_collapse_ws(f.title))
+            loc = _first_quote_location(f, blocks, blocks_by_id, brief=True)
+            lines.append(f"  - **{f.id}** — {title} ({loc})")
+
+    ordered_questions = sorted(run.questions, key=lambda q: (q.priority, q.id))
+    top_questions = ordered_questions[:5]
+    if not top_questions:
+        lines.append("- **Уточняющих вопросов: 0**")
+    else:
+        q_header = (
+            f"- **Главные вопросы (первые {len(top_questions)} из {len(ordered_questions)}):**"
+            if len(ordered_questions) > len(top_questions)
+            else "- **Главные вопросы:**"
+        )
+        lines.append(q_header)
+        for idx, q in enumerate(top_questions, 1):
+            q_text = _normalize_req_ids_in_text(_collapse_ws(q.text))
+            lines.append(f"  {idx}. **{q.id}** ({ROLE_RU[q.addressee]}): {q_text}")
+
+    return lines
+
+
+def _render_passport(
+    run: Run,
+    confirmed: list[Finding],
+    blocks_by_id: dict[str, Block],
+) -> list[str]:
     p = run.passport
     models_text = ", ".join(f"`{m}`" for m in p.models) if p.models else "не использовались (детерминированный прогон)"
-    dropped_rev = ", ".join(f"`{d}`" for d in p.dropped_reviewers) if p.dropped_reviewers else "нет"
     lines = [
         "## 1. Паспорт прогона",
         "",
@@ -462,14 +549,24 @@ def _render_passport(run: Run) -> list[str]:
         f"- **Режим проверки:** `{p.mode.value}` — {MODE_RU[p.mode]}",
         f"- **Модели:** {models_text}",
         f"- **Версия агента:** `{p.agent_version}`",
-        f"- **Отпавшие рецензенты:** {dropped_rev}",
+        f"- **Исходных замечаний до сведения:** {len(run.raw_findings)}",
     ]
+    if not p.dropped_reviewers:
+        lines.append("- **Отпавшие рецензенты:** нет")
+    else:
+        lines.append(f"- **Отпавшие рецензенты ({len(p.dropped_reviewers)}):**")
+        for entry in p.dropped_reviewers:
+            lines.append(f"  - {_format_dropped_reviewer(entry)}")
+
     if not run.segmentation_dropped:
         lines.append("- **Отброшенные кандидаты нарезки:** нет")
     else:
         lines.append(f"- **Отброшенные кандидаты нарезки ({len(run.segmentation_dropped)}):**")
         for item in run.segmentation_dropped:
             lines.append(f"  - {_collapse_ws(item)}")
+
+    lines.append("")
+    lines.extend(_render_first_screen_summary(run, confirmed, blocks_by_id))
     return lines
 
 
@@ -519,11 +616,50 @@ def _render_per_requirement(
         return lines
 
     blocks = run.document.blocks
-    for idx, (req, _) in enumerate(ordered_reqs):
-        if idx > 0:
+    parent_locations = {r.id: _format_requirement_location(r, blocks, blocks_by_id) for r in run.requirements}
+    parent_was_bullet: set[str] = set()
+    prev_was_bullet = False
+
+    for req, is_attached_child in ordered_reqs:
+        single_findings = [f for f in confirmed if not f.is_set_level and req.id in f.requirement_ids]
+        has_source_id = bool(req.source_id and req.source_id.strip())
+        source_part = f" ({req.source_id.strip()})" if has_source_id and req.source_id else ""
+        parent_part = f" [часть {req.parent_id}]" if req.parent_id else ""
+
+        if not single_findings:
+            set_refs = [f.id for f in confirmed if f.is_set_level and req.id in f.requirement_ids]
+            set_part = f" (см. замечания к набору: {', '.join(set_refs)})" if set_refs else ""
+            short_quote = _truncate_text(req.quote, 120)
+
+            if is_attached_child and req.parent_id:
+                core = f"↳ **{req.id}**{source_part}{parent_part}: «{short_quote}» — индивидуальных замечаний нет{set_part}."
+                if req.parent_id in parent_was_bullet and prev_was_bullet:
+                    lines.append(f"  - {core}")
+                else:
+                    parent_was_bullet.discard(req.parent_id)
+                    if lines and lines[-1] != "":
+                        lines.append("")
+                    lines.append(f"- {core}")
+                prev_was_bullet = True
+            else:
+                if not prev_was_bullet and lines and lines[-1] != "":
+                    lines.append("")
+                lines.append(
+                    f"- **{req.id}**{source_part}{parent_part}: «{short_quote}» — "
+                    f"индивидуальных замечаний нет{set_part}."
+                )
+                parent_was_bullet.add(req.id)
+                prev_was_bullet = True
+            continue
+
+        if is_attached_child and req.parent_id:
+            parent_was_bullet.discard(req.parent_id)
+        prev_was_bullet = False
+        if lines and lines[-1] != "":
             lines.append("")
+
         heading_parts = [req.id]
-        if req.source_id and req.source_id.strip():
+        if has_source_id and req.source_id:
             heading_parts.append(f"({req.source_id.strip()})")
         if req.parent_id:
             heading_parts.append(f"[часть {req.parent_id}]")
@@ -531,22 +667,19 @@ def _render_per_requirement(
         lines.append("")
         lines.append(f"- **Тип:** {KIND_RU[req.kind]}")
         lines.append(f"- **Краткая формулировка:** {_collapse_ws(req.summary)}")
-        lines.append(f"- **Расположение:** {_format_requirement_location(req, blocks, blocks_by_id)}")
+
+        loc = parent_locations.get(req.id) or _format_requirement_location(req, blocks, blocks_by_id)
+        omit_location = (
+            is_attached_child
+            and bool(req.parent_id)
+            and req.parent_id in parent_locations
+            and loc == parent_locations[req.parent_id]
+        )
+        if not omit_location:
+            lines.append(f"- **Расположение:** {loc}")
+
         lines.append("")
         lines.extend(_blockquote_quote(req.quote))
-
-        single_findings = [f for f in confirmed if not f.is_set_level and req.id in f.requirement_ids]
-        if not single_findings:
-            set_refs = [f.id for f in confirmed if f.is_set_level and req.id in f.requirement_ids]
-            lines.append("")
-            if set_refs:
-                lines.append(
-                    f"Для требования {req.id} подтверждено 0 индивидуальных замечаний "
-                    f"(см. замечания к набору: {', '.join(set_refs)})."
-                )
-            else:
-                lines.append(f"Для требования {req.id} подтверждено 0 индивидуальных замечаний.")
-            continue
 
         for f in single_findings:
             lines.append("")
@@ -617,11 +750,11 @@ def _render_questions(questions: list[Question], confirmed_count: int) -> list[s
             lines.append("")
         lines.append(f"### {q.id} (приоритет {q.priority})")
         lines.append("")
-        lines.append(f"- **Вопрос:** {q.text}")
+        lines.append(f"- **Вопрос:** {_normalize_req_ids_in_text(q.text)}")
         lines.append(f"- **Адресат:** {ROLE_RU[q.addressee]}")
-        lines.append(f"- **Что блокирует:** {q.blocks}")
+        lines.append(f"- **Что блокирует:** {_normalize_req_ids_in_text(q.blocks)}")
         if q.options:
-            opts = "; ".join(f"«{opt}»" for opt in q.options)
+            opts = "; ".join(f"«{_normalize_req_ids_in_text(opt)}»" for opt in q.options)
             lines.append(f"- **Варианты ответа:** {opts}")
         else:
             lines.append("- **Варианты ответа:** документ не сужает выбор до фиксированных вариантов")
@@ -686,9 +819,10 @@ def _render_summary(
                 if f.requirement_ids
                 else "весь документ"
             )
-            loc = _finding_locations_summary(f, blocks, blocks_by_id)
+            loc = _first_quote_location(f, blocks, blocks_by_id)
+            title = _normalize_req_ids_in_text(_collapse_ws(f.title))
             lines.append(
-                f"- **{f.id}** ({NAME_RU[f.criterion]}): {_collapse_ws(f.title)} — "
+                f"- **{f.id}** ({NAME_RU[f.criterion]}): {title} — "
                 f"требования: {req_part}; расположение: {loc}"
             )
     return lines
@@ -719,8 +853,9 @@ def _render_verdict(
         for fid in v.fix_first:
             f = confirmed_by_id.get(fid)
             if f is not None:
-                loc = _finding_locations_summary(f, blocks, blocks_by_id)
-                lines.append(f"- **{f.id}** — {_collapse_ws(f.title)} ({loc})")
+                loc = _first_quote_location(f, blocks, blocks_by_id)
+                title = _normalize_req_ids_in_text(_collapse_ws(f.title))
+                lines.append(f"- **{f.id}** — {title} ({loc})")
             else:
                 lines.append(f"- **{fid}**")
 
@@ -738,8 +873,9 @@ def _render_verdict(
             )
             lines.append("")
             for f in test_blockers:
-                loc = _finding_locations_summary(f, blocks, blocks_by_id)
-                lines.append(f"- **{f.id}** ({NAME_RU[f.criterion]}) — {_collapse_ws(f.title)} ({loc})")
+                loc = _first_quote_location(f, blocks, blocks_by_id)
+                title = _normalize_req_ids_in_text(_collapse_ws(f.title))
+                lines.append(f"- **{f.id}** ({NAME_RU[f.criterion]}) — {title} ({loc})")
     return lines
 
 
@@ -753,7 +889,7 @@ def render(run: Run) -> str:
     doc_title = run.passport.document_name or run.document.name
     sections: list[list[str]] = [
         [f"# Отчёт о проверке требований: {doc_title}"],
-        _render_passport(run),
+        _render_passport(run, confirmed, blocks_by_id),
         _render_segmentation(run, ordered_reqs),
         _render_per_requirement(run, ordered_reqs, confirmed, blocks_by_id, reqs_by_id),
         _render_set_level(run, confirmed, blocks_by_id, reqs_by_id),
