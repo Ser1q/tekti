@@ -20,7 +20,9 @@ Precedence (first match wins):
 
 Environment variables (a `.env` in the working directory is read too; real environment variables win):
 
-    TEKTI_PROVIDER         auto (default) | vendors | bedrock | openai_compatible
+    TEKTI_PROVIDER         auto (default) | vendors | openrouter | bedrock | openai_compatible
+    OPENROUTER_API_KEY     one key for all three vendors through OpenRouter (used when no vendor key is set,
+                           or with TEKTI_PROVIDER=openrouter); never printed or logged
     TEKTI_GATEWAY_URL      https://<id>.lambda-url.<region>.on.aws
     TEKTI_GATEWAY_TOKEN    the owner's gateway token (never printed or logged); others use `tekti login`
     TEKTI_GITHUB_CLIENT_ID GitHub OAuth app client id for `tekti login` (default DEFAULT_GITHUB_CLIENT_ID)
@@ -188,6 +190,20 @@ VENDOR_ROLES: dict[str, list[ModelSpec]] = {
     "segmenter": [_HAIKU, _TERRA, _CARBON],
     "merge_model": [_TERRA, _HAIKU, _CARBON],
     "question_writer": [_TERRA, _CARBON, _HAIKU],
+}
+# One OpenRouter key instead of three vendor keys: the same three models, reached through OpenRouter's
+# OpenAI-compatible endpoint. Ids and reasoning options checked against GET openrouter.ai/api/v1/models on
+# 27 Nov 2026. Run end to end through OpenRouter on a free model (particle-ai/particle-1:free, small test
+# document, 24 of 25 calls ok); these three paid models themselves were not run there (no credits).
+_OR_TERRA = ModelSpec(family="openai", model_id="openai/gpt-6.1-terra", provider="openai_compatible")
+_OR_HAIKU = ModelSpec(family="anthropic", model_id="anthropic/claude-haiku-5.5", provider="openai_compatible")
+_OR_CARBON = ModelSpec(family="google", model_id="google/gemini-4-carbon", provider="openai_compatible")
+_OR_FLASH_LITE = ModelSpec(family="google", model_id="google/gemini-3.5-flash-lite", provider="openai_compatible")
+OPENROUTER_BENCH: list[ModelSpec] = [_OR_TERRA, _OR_HAIKU, _OR_CARBON]
+OPENROUTER_ROLES: dict[str, ModelSpec] = {
+    "segmenter": _OR_HAIKU,
+    "merge_model": _OR_TERRA,
+    "question_writer": _OR_TERRA,
 }
 # Google as the only vendor (typically a free AI Studio key): both Hydrogen and Flash-Lite have a free tier.
 GOOGLE_ONLY = _HYDROGEN
@@ -422,12 +438,19 @@ def load_config(mode: Mode | str = Mode.BOARD, env: Mapping[str, str] | None = N
     available = set(VENDORS) if gateway_url else set(vendor_keys)
 
     requested = (e.get("TEKTI_PROVIDER", "").strip() or "auto").lower()
-    if requested not in ("auto", "vendors", "bedrock", "openai_compatible"):
+    if requested not in ("auto", "vendors", "openrouter", "bedrock", "openai_compatible"):
         raise ValueError(
-            f"TEKTI_PROVIDER должен быть auto, vendors, bedrock или openai_compatible, получено: {requested!r}"
+            "TEKTI_PROVIDER должен быть auto, vendors, openrouter, bedrock или openai_compatible, "
+            f"получено: {requested!r}"
         )
+    openrouter_key = e.get("OPENROUTER_API_KEY", "").strip()
+    via_openrouter = requested == "openrouter" or (requested == "auto" and not available and bool(openrouter_key))
+    if via_openrouter and not openrouter_key:
+        raise ValueError("TEKTI_PROVIDER=openrouter: задайте OPENROUTER_API_KEY")
     provider: ProviderMode
-    if requested == "auto":
+    if via_openrouter:
+        provider = "openai_compatible"
+    elif requested == "auto":
         provider = "vendors" if available else "bedrock"
     else:
         provider = requested  # type: ignore[assignment]
@@ -466,11 +489,15 @@ def load_config(mode: Mode | str = Mode.BOARD, env: Mapping[str, str] | None = N
         bench = parse_panel(explicit_panel, provider)
         if provider == "vendors":  # roles keep their own defaults; only the panel was overridden
             roles = _vendor_defaults(available)[1]
+        elif via_openrouter:
+            roles = dict(OPENROUTER_ROLES)
     elif provider == "bedrock":
         bench = [s.model_copy() for s in DEFAULT_BENCH]
         roles = {"segmenter": DEFAULT_SEGMENTER, "question_writer": DEFAULT_QUESTION_WRITER}
     elif provider == "vendors":
         bench, roles = _vendor_defaults(available)
+    elif via_openrouter:
+        bench, roles = [m.model_copy() for m in OPENROUTER_BENCH], dict(OPENROUTER_ROLES)
     else:
         raise ValueError(
             "Для TEKTI_PROVIDER=openai_compatible задайте TEKTI_PANEL (например qwen:qwen3:32b) и TEKTI_BASE_URL"
@@ -498,6 +525,10 @@ def load_config(mode: Mode | str = Mode.BOARD, env: Mapping[str, str] | None = N
 
     base_url = e.get("TEKTI_BASE_URL", "").strip() or None
     api_key = e.get("TEKTI_API_KEY", "").strip() or None
+    if via_openrouter:
+        from tekti.llm_backends.providers import OPENROUTER_BASE_URL
+
+        base_url, api_key = base_url or OPENROUTER_BASE_URL, openrouter_key
 
     default_parallel = "2" if provider == "vendors" and available == {"google"} else "6"
     reasoning = {**DEFAULT_REASONING, **parse_reasoning(e.get("TEKTI_REASONING", ""))}
@@ -577,6 +608,11 @@ def install_backend(cfg: Config) -> None:
     llm.use_fallbacks(
         {
             ("google", model_id): GOOGLE_CALL_STAND_IN
+            for model_id in GOOGLE_FALLBACKS
+            if model_id != GOOGLE_CALL_STAND_IN.model_id
+        }
+        | {  # the same stand-in when the models are reached through OpenRouter
+            ("openai_compatible", f"google/{model_id}"): _OR_FLASH_LITE
             for model_id in GOOGLE_FALLBACKS
             if model_id != GOOGLE_CALL_STAND_IN.model_id
         }
@@ -679,6 +715,10 @@ def price_of(model_id: str, prices: Mapping[str, tuple[float, float]] | None = N
     (dated snapshots, "models/" prefixes). None when unpriced."""
     table = PRICES_PER_1M if prices is None else prices
     mid = model_id.strip().lower().removeprefix("models/")
+    if mid.startswith(("openai/", "anthropic/", "google/")):  # OpenRouter ids: vendor/model, Claude with a dot
+        mid = mid.split("/", 1)[1]
+        if mid.startswith("claude-"):
+            mid = mid.replace(".", "-")
     if mid in table:
         return table[mid]
     matches = [k for k in table if mid.startswith(k)]

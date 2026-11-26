@@ -588,3 +588,94 @@ async def test_failed_call_is_retried_once_on_the_stand_in(monkeypatch):
     finally:
         llm.use_fallbacks({})
         llm.reset_calls()
+
+
+# --------------------------------------------------------------------------- OpenRouter: one key for three vendors
+
+
+def test_openrouter_key_gives_the_same_three_families_through_one_endpoint():
+    from tekti.llm_backends.providers import OPENROUTER_BASE_URL
+
+    cfg = load_config(Mode.BOARD, env={"OPENROUTER_API_KEY": "sk-or-test"})
+    assert [(s.family, s.model_id) for s in cfg.panel] == [
+        ("openai", "openai/gpt-6.1-terra"),
+        ("anthropic", "anthropic/claude-haiku-5.5"),
+        ("google", "google/gemini-4-carbon"),
+    ]
+    assert {s.provider for s in cfg.all_models()} == {"openai_compatible"}
+    assert cfg.segmenter.model_id == "anthropic/claude-haiku-5.5"
+    assert cfg.merge_model.model_id == cfg.question_writer.model_id == "openai/gpt-6.1-terra"
+    assert cfg.base_url == OPENROUTER_BASE_URL and cfg.api_key.get_secret_value() == "sk-or-test"
+    assert "sk-or-test" not in repr(cfg) and "sk-or-test" not in cfg.model_dump_json()
+    assert [s.family for s in load_config(Mode.FAST, env={"OPENROUTER_API_KEY": "k"}).panel] == ["openai"]
+
+
+def test_vendor_keys_win_over_openrouter_unless_it_is_asked_for():
+    both = {**KEYS, "OPENROUTER_API_KEY": "sk-or-test"}
+    assert {s.provider for s in load_config(Mode.BOARD, env=both).panel} == {"openai", "anthropic", "google"}
+    forced = load_config(Mode.BOARD, env={**both, "TEKTI_PROVIDER": "openrouter"})
+    assert {s.provider for s in forced.panel} == {"openai_compatible"}
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        load_config(Mode.BOARD, env={"TEKTI_PROVIDER": "openrouter"})
+    # an explicit panel through OpenRouter keeps the role defaults
+    custom = load_config(
+        Mode.BOARD,
+        env={"OPENROUTER_API_KEY": "k", "TEKTI_PANEL": "openai:openai/gpt-6.2-sol,google:google/gemini-4-neon"},
+    )
+    assert [s.model_id for s in custom.panel] == ["openai/gpt-6.2-sol", "google/gemini-4-neon"]
+    assert custom.segmenter.model_id == "anthropic/claude-haiku-5.5"
+
+
+def test_openrouter_request_carries_reasoning_and_headroom():
+    from tekti.llm_backends.providers import OPENROUTER_BASE_URL, build_model, is_openrouter, openrouter_reasoning
+
+    assert is_openrouter(OPENROUTER_BASE_URL) and not is_openrouter("http://localhost:11434/v1")
+    assert not is_openrouter("https://openrouter.ai.example.com/v1") and not is_openrouter(None)
+    assert openrouter_reasoning("anthropic/claude-haiku-5.5", "off") == {"reasoning": {"effort": "none"}}
+    assert openrouter_reasoning("google/gemini-4-carbon", "off") == {"reasoning": {"effort": "low"}}  # mandatory there
+    assert openrouter_reasoning("openai/gpt-6.1-terra", "medium") == {"reasoning": {"effort": "medium"}}
+    assert openrouter_reasoning("openai/gpt-6.1-terra", None) == {}
+
+    def params(model_id, level, base=OPENROUTER_BASE_URL):
+        spec = ModelSpec(family="x", model_id=model_id, provider="openai_compatible")
+        model = build_model(
+            spec, max_tokens=12000, use_temperature=False, compat_base_url=base, compat_api_key="k", reasoning=level
+        )
+        return model.get_config()["params"]
+
+    assert params("openai/gpt-6.1-terra", "medium") == {
+        "max_tokens": 24000,
+        "extra_body": {"reasoning": {"effort": "medium"}},
+    }
+    assert params("anthropic/claude-haiku-5.5", "off") == {
+        "max_tokens": 12000,
+        "extra_body": {"reasoning": {"effort": "none"}},
+    }
+    # any other compatible endpoint is left alone
+    assert params("qwen3:32b", "medium", base="http://localhost:11434/v1") == {"max_tokens": 12000}
+
+
+def test_openrouter_models_use_family_reasoning_levels_prices_and_the_stand_in():
+    from tekti import llm
+    from tekti.config import install_backend, make_backend
+
+    cfg = load_config(Mode.BOARD, env={"OPENROUTER_API_KEY": "k"})
+    backend = make_backend(cfg)
+    carbon, haiku = cfg.panel[2], cfg.segmenter
+    assert backend._level(carbon.family, "panel") == "low"  # the "google:panel" default applies by family
+    assert backend._model(carbon, 12000, "panel").get_config()["params"]["extra_body"] == {
+        "reasoning": {"effort": "low"}
+    }
+    assert backend._model(haiku, 12000, "segment").get_config()["params"]["extra_body"] == {
+        "reasoning": {"effort": "none"}
+    }
+    assert not sends_temperature("openai_compatible", "openai/gpt-6.1-terra")
+    assert price_of("openai/gpt-6.1-terra") == price_of("gpt-6.1-terra")
+    assert price_of("anthropic/claude-haiku-5.5") == price_of("claude-haiku-5-5")
+    assert price_of("google/gemini-4-carbon") == price_of("gemini-4-carbon")
+    try:
+        install_backend(cfg)
+        stand_in = llm._fallbacks[("openai_compatible", "google/gemini-4-carbon")]
+        assert (stand_in.provider, stand_in.model_id) == ("openai_compatible", "google/gemini-3.5-flash-lite")
+    finally:
+        llm.use_fallbacks({})

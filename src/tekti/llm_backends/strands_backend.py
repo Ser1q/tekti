@@ -119,7 +119,8 @@ class StrandsBackend:
 
     def _model(self, spec: ModelSpec, max_tokens: int, stage: str = "default") -> Any:
         use_temp = self._uses_temperature(spec)
-        level = self._level(spec.provider, stage)
+        # A compatible endpoint (OpenRouter) serves several vendors: the level is looked up by family there.
+        level = self._level(spec.family if spec.provider == "openai_compatible" else spec.provider, stage)
         key = (spec.provider, spec.model_id, max_tokens, use_temp, level)
         if key in self._models:
             return self._models[key]

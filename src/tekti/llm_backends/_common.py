@@ -81,6 +81,8 @@ def sends_temperature(provider: str, model_id: str) -> bool:
     """
     if provider == "anthropic":
         return False
+    if provider == "openai_compatible" and model_id.lower().startswith(("openai/", "anthropic/", "google/")):
+        return False  # vendor reasoning models behind OpenRouter: same rule as calling the vendor
     prefixes = _NO_TEMPERATURE_PREFIXES.get(provider, ())
     return not model_id.lower().startswith(prefixes)
 

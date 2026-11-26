@@ -109,6 +109,29 @@ def reasoning_params(provider: str, model_id: str, level: str | None) -> dict[st
     return {"thinking_config": {"thinking_level": "LOW" if level == "off" else level.upper()}}
 
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def is_openrouter(base_url: str | None) -> bool:
+    from urllib.parse import urlsplit
+
+    host = (urlsplit(base_url or "").hostname or "").lower()
+    return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+
+def openrouter_reasoning(model_id: str, level: str | None) -> dict[str, Any]:
+    """OpenRouter's one `reasoning` field for every vendor (openrouter.ai/docs, "Reasoning Tokens").
+
+    "off" becomes effort "none", except for Gemini models, whose reasoning is mandatory there
+    (GET /api/v1/models lists no "none" for them): those get the lowest level they all accept.
+    """
+    if not level:
+        return {}
+    if level == "off":
+        return {"reasoning": {"effort": "low" if model_id.lower().startswith("google/") else "none"}}
+    return {"reasoning": {"effort": level}}
+
+
 def output_cap(provider: str, model_id: str, max_tokens: int, level: str | None) -> int:
     """The answer budget plus room for thinking at this level."""
     if level and supports_reasoning_level(provider, model_id):
@@ -211,6 +234,13 @@ def build_model(
         if not compat_base_url:
             raise LLMError("openai_compatible provider needs TEKTI_BASE_URL")
         params: dict[str, Any] = {"max_tokens": max_tokens}
+        if is_openrouter(compat_base_url):
+            # Reasoning tokens count against max_tokens there too, so the cap gets the same headroom.
+            body = openrouter_reasoning(spec.model_id, reasoning)
+            if body:
+                params["extra_body"] = body
+                if body["reasoning"]["effort"] != "none":
+                    params["max_tokens"] = max_tokens + THINKING_HEADROOM.get(reasoning or "", 0)
         if use_temperature:
             params["temperature"] = 0.0
         return OpenAIModel(
