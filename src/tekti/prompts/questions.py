@@ -6,9 +6,9 @@ The examples are deliberately from an unrelated domain so the prompt stays gener
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from tekti.contracts import Role
+from tekti.contracts import Role, list_from_json_text
 
 QUESTIONS_SYSTEM = """\
 You write the clarifying questions that close a review of a requirements document. \
@@ -81,3 +81,8 @@ class DraftQuestion(BaseModel):
 
 class QuestionsAnswer(BaseModel):
     questions: list[DraftQuestion] = Field(default_factory=list)
+
+    @field_validator("questions", mode="before")
+    @classmethod
+    def _questions_as_list(cls, value: object) -> object:
+        return list_from_json_text(value)

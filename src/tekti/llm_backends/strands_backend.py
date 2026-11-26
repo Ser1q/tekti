@@ -204,6 +204,8 @@ class StrandsBackend:
             )
         parsed = result.structured_output
         if parsed is None:
+            parsed = _from_text(getattr(agent, "messages", None) or [], schema)
+        if parsed is None:
             raise LLMError(
                 f"no structured output for schema {schema.__name__} (stop_reason={result.stop_reason}, "
                 f"tokens in/out {tokens_in}/{tokens_out})"
@@ -211,6 +213,26 @@ class StrandsBackend:
         if not isinstance(parsed, schema):  # defensive: re-validate whatever came back
             parsed = schema.model_validate(parsed.model_dump() if isinstance(parsed, BaseModel) else parsed)
         return parsed, tokens_in, tokens_out
+
+
+def _from_text(messages: list[Any], schema: type[T]) -> T | None:
+    """Last resort when a model wrote its answer as JSON text instead of calling the output tool:
+    validate the JSON object found in its latest text against the schema."""
+    import json
+
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        for part in reversed(message.get("content") or []):
+            text = part.get("text") if isinstance(part, dict) else None
+            if not text or "{" not in text:
+                continue
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(text[text.index("{") :])
+                return schema.model_validate(obj)
+            except ValueError:  # includes pydantic.ValidationError
+                continue
+    return None
 
 
 async def _smoke() -> None:  # pragma: no cover - manual check: uv run python -m tekti.llm_backends.strands_backend

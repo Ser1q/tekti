@@ -41,6 +41,24 @@ def normalize_ws(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def list_from_json_text(value: object) -> object:
+    """Model-output repair for list fields: some models send a list as a JSON string, sometimes with
+    stray characters after it. Returns the parsed list, or the value unchanged when it is not that."""
+    if not isinstance(value, str):
+        return value
+    import json
+
+    text = value.strip()
+    start = text.find("[")
+    if start < 0:
+        return value
+    try:
+        parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return value
+    return parsed if isinstance(parsed, list) else value
+
+
 # --------------------------------------------------------------------------- enums
 
 

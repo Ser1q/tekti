@@ -212,3 +212,20 @@ def test_strands_openai_compatible_needs_base_url():
         ModelSpec(family="google", model_id="g", provider="openai_compatible"), 100
     )
     assert model.get_config()["params"] == {"max_tokens": 100, "temperature": 0.0}
+
+
+def test_answer_written_as_text_is_recovered():
+    from pydantic import BaseModel
+
+    from tekti.llm_backends.strands_backend import _from_text
+
+    class Answer(BaseModel):
+        capital: str
+
+    messages = [
+        {"role": "user", "content": [{"text": "?"}]},
+        {"role": "assistant", "content": [{"reasoningContent": {}}, {"text": '```json\n{"capital": "Paris"}\n```'}]},
+    ]
+    assert _from_text(messages, Answer) == Answer(capital="Paris")
+    assert _from_text([{"role": "assistant", "content": [{"text": "no json here"}]}], Answer) is None
+    assert _from_text([{"role": "assistant", "content": [{"text": '{"other": 1}'}]}], Answer) is None

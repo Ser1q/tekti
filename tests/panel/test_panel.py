@@ -306,3 +306,22 @@ def test_each_lens_has_its_own_method():
         assert "worksheet" not in prompts[lens]
         assert "черновик" not in prompts[lens]
         assert "question обязательно" in prompts[lens]
+
+
+def test_reviewer_output_accepts_findings_sent_as_a_json_string():
+    from tekti.panel.schema import ReviewerOutput
+
+    item = '{"criterion":"complete","severity":"major","title":"t","explanation":"e","evidence":[{"quote":"q"}]}'
+    out = ReviewerOutput.model_validate({"findings": f"[{item}]}}"})  # stray brace after the list, as seen live
+    assert len(out.findings) == 1 and out.findings[0].title == "t"
+    assert ReviewerOutput.model_validate({"findings": []}).findings == []
+
+
+def test_reviewer_finding_accepts_nested_lists_sent_as_strings_or_single_objects():
+    from tekti.panel.schema import ReviewerFinding
+
+    base = {"criterion": "complete", "severity": "major", "title": "t", "explanation": "e"}
+    as_text = ReviewerFinding.model_validate({**base, "evidence": '[{"quote":"q"}]', "requirement_ids": '["R-001"]'})
+    assert as_text.evidence[0].quote == "q" and as_text.requirement_ids == ["R-001"]
+    single = ReviewerFinding.model_validate({**base, "evidence": {"quote": "q"}})
+    assert len(single.evidence) == 1

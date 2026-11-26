@@ -7,9 +7,9 @@ model is steered to the closed lists while one odd value costs only that finding
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from tekti.contracts import Criterion, Role, Severity
+from tekti.contracts import Criterion, Role, Severity, list_from_json_text
 
 _CRITERIA = [c.value for c in Criterion]
 _SEVERITIES = [s.value for s in Severity]
@@ -56,9 +56,22 @@ class ReviewerFinding(BaseModel):
         json_schema_extra={"enum": [*_ROLES, None]},
     )
 
+    @field_validator("requirement_ids", "evidence", mode="before")
+    @classmethod
+    def _lists(cls, value: object) -> object:
+        # Same repair one level down; a single evidence object is taken as a list of one.
+        return [value] if isinstance(value, dict) else list_from_json_text(value)
+
 
 class ReviewerOutput(BaseModel):
     findings: list[ReviewerFinding] = Field(
         default_factory=list,
         description="Все найденные дефекты в пределах вашего угла. Пустой список, если дефектов нет.",
     )
+
+    @field_validator("findings", mode="before")
+    @classmethod
+    def _findings_as_list(cls, value: object) -> object:
+        # Claude Haiku 5.5 sometimes sends the whole list as one JSON string; accept it instead of
+        # paying for a second attempt (and losing the reviewer when that fails too).
+        return list_from_json_text(value)
