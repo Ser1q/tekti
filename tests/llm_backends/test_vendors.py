@@ -495,7 +495,7 @@ async def test_overloaded_google_model_is_replaced_for_the_whole_run():
     cfg = load_config(Mode.BOARD, env={**KEYS, "TEKTI_QUESTION_WRITER": "google:gemini-4-hydrogen"})
     stub = _SlowGoogle(slow={"gemini-4-hydrogen"})
     new, notes = await choose_responsive_models(cfg, timeout=0.2, backend=stub)
-    assert stub.asked == ["gemini-4-hydrogen", "gemini-3.5-flash-lite"]
+    assert stub.asked == ["gemini-4-hydrogen", "gemini-4-hydrogen", "gemini-3.5-flash-lite"]  # two tries, then the next
     assert [s.model_id for s in new.panel] == ["gpt-6.1-terra", "claude-haiku-5-5", "gemini-3.5-flash-lite"]
     assert new.question_writer.model_id == "gemini-3.5-flash-lite" and new.segmenter == cfg.segmenter
     assert len(notes) == 1 and "gemini-4-hydrogen" in notes[0] and "gemini-3.5-flash-lite" in notes[0]

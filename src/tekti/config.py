@@ -40,7 +40,7 @@ Environment variables (a `.env` in the working directory is read too; real envir
     TEKTI_REASONING        thinking level per stage, e.g. "panel=high,challenge=low,google:panel=medium";
                            stages: segment, panel, challenge, merge, questions, default; levels off/low/medium/high
     TEKTI_PROBE_TIMEOUT    seconds a Google model gets to answer a tiny request at start-up before the next one
-                           in GOOGLE_FALLBACKS replaces it (default 25; 0 turns the check off)
+                           in GOOGLE_FALLBACKS replaces it (default 45; two tries; 0 turns the check off)
     TEKTI_BASE_URL         OpenAI-compatible endpoint, e.g. http://localhost:11434/v1 (Ollama)
     TEKTI_API_KEY          key for that endpoint (never printed or logged)
 
@@ -571,12 +571,12 @@ def install_backend(cfg: Config) -> None:
 def probe_timeout(env: Mapping[str, str] | None = None) -> float:
     e = _env(env)
     try:
-        return max(0.0, float(e.get("TEKTI_PROBE_TIMEOUT", "").strip() or "25"))
+        return max(0.0, float(e.get("TEKTI_PROBE_TIMEOUT", "").strip() or "45"))
     except ValueError:
-        return 25.0
+        return 45.0
 
 
-async def choose_responsive_models(cfg: Config, timeout: float = 25.0, backend=None) -> tuple[Config, list[str]]:
+async def choose_responsive_models(cfg: Config, timeout: float = 45.0, backend=None) -> tuple[Config, list[str]]:
     """Replace a Google model that does not answer a tiny request within `timeout` seconds by the next model in
     GOOGLE_FALLBACKS, for the whole run (so the passport's model list shows what really ran).
 
@@ -592,6 +592,11 @@ async def choose_responsive_models(cfg: Config, timeout: float = 25.0, backend=N
         capital: str
 
     async def answers(model_id: str) -> bool:
+        # Two tries: Gemini 4 usually answers this in 5-20 s but one request in three is much slower
+        # (measured 26 Nov 2026), and a single slow answer should not cost the seat for the whole run.
+        return await answers_once(model_id) or await answers_once(model_id)
+
+    async def answers_once(model_id: str) -> bool:
         spec = ModelSpec(family="google", model_id=model_id, provider="google")
         try:
             await asyncio.wait_for(
