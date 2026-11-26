@@ -41,6 +41,22 @@ _backend: Backend | None = None
 _calls: list[ModelCall] = []
 
 
+_fallbacks: dict[tuple[str, str], ModelSpec] = {}
+
+
+def use_fallbacks(mapping: dict[tuple[str, str], ModelSpec]) -> None:
+    """Per-call stand-ins, keyed by (provider, model_id): when a call to that model fails or runs out of
+    time, the same request is sent once to the stand-in. Set by the configuration; empty in tests."""
+    _fallbacks.clear()
+    _fallbacks.update(mapping)
+
+
+# Share of the call limit the first model gets when a stand-in is waiting. A review legitimately takes
+# minutes; a challenge, a merge or a question batch does not, so a stuck one is given up on sooner.
+_FIRST_ATTEMPT_SHARE = {"panel": 0.8}
+_FIRST_ATTEMPT_SHARE_DEFAULT = 0.4
+
+
 def use_backend(backend: Backend) -> None:
     """Install a backend. Tests install a fake; the CLI installs the real one."""
     global _backend
@@ -80,42 +96,57 @@ async def ask(
 
     `system` holds instructions only. Document text goes in `user`, wrapped by the
     caller in <document>...</document> and described there as data to be reviewed.
-    Records a ModelCall whether the call succeeds or fails. Raises LLMError on failure.
+    Records a ModelCall for every attempt, successful or not. If the model has a stand-in (see
+    `use_fallbacks`) a failed call is retried on it once. Raises LLMError when every attempt failed.
     """
     import asyncio
     import time
 
     if _backend is None:
         raise LLMError("no backend installed; call tekti.llm.use_backend first")
-    started = time.monotonic()
-    try:
+    stand_in = _fallbacks.get((model.provider, model.model_id))
+    if stand_in is not None and stand_in.model_id == model.model_id:
+        stand_in = None
+    attempts = [model] if stand_in is None else [model, stand_in]
+    last_error: Exception | None = None
+    for n, spec in enumerate(attempts):
         # One call may not stall the run: a vendor that keeps answering "overloaded" can otherwise hold a
-        # reviewer for many minutes of retries. On the deadline the reviewer is dropped and recorded.
-        parsed, tokens_in, tokens_out = await asyncio.wait_for(
-            _backend.complete(model, system=system, user=user, schema=schema, max_tokens=max_tokens),
-            timeout=call_timeout_seconds(),
-        )
-    except Exception as exc:
+        # reviewer for many minutes of retries. On the deadline the call is dropped and recorded; when a
+        # stand-in model is configured it gets the same request once.
+        limit = call_timeout_seconds()
+        has_next = n + 1 < len(attempts)
+        if has_next:
+            limit *= _FIRST_ATTEMPT_SHARE.get(stage, _FIRST_ATTEMPT_SHARE_DEFAULT)
+        started = time.monotonic()
+        try:
+            parsed, tokens_in, tokens_out = await asyncio.wait_for(
+                _backend.complete(spec, system=system, user=user, schema=schema, max_tokens=max_tokens),
+                timeout=limit,
+            )
+        except Exception as exc:  # noqa: BLE001 - any failure of one attempt is recorded, then the stand-in is tried
+            note = f"; повтор на {attempts[n + 1].model_id}" if has_next else ""
+            _calls.append(
+                ModelCall(
+                    stage=stage,
+                    lens=lens,
+                    model=spec.model_id,
+                    ok=False,
+                    error=(f"{type(exc).__name__}: {exc}"[:440] + note),
+                    seconds=time.monotonic() - started,
+                )
+            )
+            last_error = exc
+            continue
         _calls.append(
             ModelCall(
                 stage=stage,
                 lens=lens,
-                model=model.model_id,
-                ok=False,
-                error=f"{type(exc).__name__}: {exc}"[:500],
+                model=spec.model_id,
+                ok=True,
+                input_tokens=tokens_in,
+                output_tokens=tokens_out,
                 seconds=time.monotonic() - started,
             )
         )
-        raise LLMError(str(exc)) from exc
-    _calls.append(
-        ModelCall(
-            stage=stage,
-            lens=lens,
-            model=model.model_id,
-            ok=True,
-            input_tokens=tokens_in,
-            output_tokens=tokens_out,
-            seconds=time.monotonic() - started,
-        )
-    )
-    return parsed
+        return parsed
+    raise LLMError(str(last_error)) from last_error

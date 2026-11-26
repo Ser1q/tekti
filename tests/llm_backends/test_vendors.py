@@ -311,7 +311,7 @@ def test_no_credentials_means_bedrock_defaults():
 def test_gateway_gives_vendor_defaults_and_wins_over_keys():
     cfg = load_config(env={**KEYS, "TEKTI_GATEWAY_URL": "https://gw.example/", "TEKTI_GATEWAY_TOKEN": TOKEN})
     assert cfg.provider_mode == "vendors" and cfg.panel == VENDOR_BENCH
-    assert [s.model_id for s in cfg.panel] == ["gpt-6.1-terra", "claude-haiku-5-5", "gemini-4-hydrogen"]
+    assert [s.model_id for s in cfg.panel] == ["gpt-6.1-terra", "claude-haiku-5-5", "gemini-4-carbon"]
     assert cfg.segmenter.model_id == "claude-haiku-5-5" and cfg.merge_model.model_id == "gpt-6.1-terra"
     assert cfg.question_writer.model_id == "gpt-6.1-terra"
     assert cfg.reasoning["segment"] == "off" and cfg.reasoning["google:panel"] == "low"
@@ -492,13 +492,17 @@ class _SlowGoogle:
 async def test_overloaded_google_model_is_replaced_for_the_whole_run():
     from tekti.config import choose_responsive_models
 
-    cfg = load_config(Mode.BOARD, env={**KEYS, "TEKTI_QUESTION_WRITER": "google:gemini-4-hydrogen"})
-    stub = _SlowGoogle(slow={"gemini-4-hydrogen"})
+    cfg = load_config(Mode.BOARD, env={**KEYS, "TEKTI_QUESTION_WRITER": "google:gemini-4-carbon"})
+    stub = _SlowGoogle(slow={"gemini-4-carbon"})
     new, notes = await choose_responsive_models(cfg, timeout=0.2, backend=stub)
-    assert stub.asked == ["gemini-4-hydrogen", "gemini-4-hydrogen", "gemini-3.5-flash-lite"]  # two tries, then the next
-    assert [s.model_id for s in new.panel] == ["gpt-6.1-terra", "claude-haiku-5-5", "gemini-3.5-flash-lite"]
-    assert new.question_writer.model_id == "gemini-3.5-flash-lite" and new.segmenter == cfg.segmenter
-    assert len(notes) == 1 and "gemini-4-hydrogen" in notes[0] and "gemini-3.5-flash-lite" in notes[0]
+    assert stub.asked == ["gemini-4-carbon", "gemini-4-carbon", "gemini-4-hydrogen"]  # two tries, then the next
+    assert [s.model_id for s in new.panel] == ["gpt-6.1-terra", "claude-haiku-5-5", "gemini-4-hydrogen"]
+    assert new.question_writer.model_id == "gemini-4-hydrogen" and new.segmenter == cfg.segmenter
+    assert len(notes) == 1 and "gemini-4-carbon" in notes[0] and "gemini-4-hydrogen" in notes[0]
+    # both Gemini 4 models silent: the last one in the chain takes the seat
+    stub = _SlowGoogle(slow={"gemini-4-carbon", "gemini-4-hydrogen"})
+    new, _ = await choose_responsive_models(cfg, timeout=0.2, backend=stub)
+    assert new.panel[2].model_id == "gemini-3.5-flash-lite"
     # answering in time, or the check switched off, changes nothing
     same, notes = await choose_responsive_models(cfg, timeout=0.2, backend=_SlowGoogle(slow=set()))
     assert same == cfg and notes == []
@@ -515,3 +519,72 @@ def test_estimate_cost_prices_every_default_model():
 
     models = {s.model_id for s in VENDOR_BENCH} | {s.model_id for v in VENDOR_ROLES.values() for s in v}
     assert all(price_of(m) for m in models | set(GOOGLE_FALLBACKS))
+
+
+# --------------------------------------------------------------------------- per-call stand-in
+
+
+class _Flaky:
+    """Fails (or hangs) for the listed models, answers for the rest."""
+
+    def __init__(self, fail: set[str], hang: bool = False):
+        self.fail, self.hang, self.asked = fail, hang, []
+
+    async def complete(self, model, *, system, user, schema, max_tokens):
+        import asyncio
+
+        self.asked.append(model.model_id)
+        if model.model_id in self.fail:
+            if self.hang:
+                await asyncio.sleep(30)
+            raise RuntimeError("This model is currently experiencing high demand.")
+        return schema(capital="Paris"), 10, 5
+
+
+async def test_failed_call_is_retried_once_on_the_stand_in(monkeypatch):
+    from pydantic import BaseModel
+
+    from tekti import llm
+    from tekti.llm import LLMError, ModelSpec
+
+    class Answer(BaseModel):
+        capital: str
+
+    carbon = ModelSpec(family="google", model_id="gemini-4-carbon", provider="google")
+    lite = ModelSpec(family="google", model_id="gemini-3.5-flash-lite", provider="google")
+    backend = _Flaky({"gemini-4-carbon"})
+    llm.use_backend(backend)
+    llm.use_fallbacks({("google", "gemini-4-carbon"): lite})
+    llm.reset_calls()
+    try:
+        out = await llm.ask(carbon, system="s", user="u", schema=Answer, stage="panel")
+        assert out.capital == "Paris" and backend.asked == ["gemini-4-carbon", "gemini-3.5-flash-lite"]
+        first, second = llm.calls()
+        assert (first.model, first.ok) == ("gemini-4-carbon", False) and "gemini-3.5-flash-lite" in first.error
+        assert (second.model, second.ok, second.input_tokens) == ("gemini-3.5-flash-lite", True, 10)
+
+        # a hung first model is given up on before the whole call limit, then the stand-in answers
+        monkeypatch.setenv("TEKTI_CALL_TIMEOUT", "10")
+        monkeypatch.setattr(llm, "_FIRST_ATTEMPT_SHARE_DEFAULT", 0.02)
+        hung = _Flaky({"gemini-4-carbon"}, hang=True)
+        llm.use_backend(hung)
+        assert (await llm.ask(carbon, system="s", user="u", schema=Answer, stage="challenge")).capital == "Paris"
+
+        # both fail: one LLMError; a model without a stand-in is tried once
+        llm.use_backend(_Flaky({"gemini-4-carbon", "gemini-3.5-flash-lite", "gpt-6.1-terra"}))
+        with pytest.raises(LLMError):
+            await llm.ask(carbon, system="s", user="u", schema=Answer, stage="panel")
+        solo = _Flaky({"gpt-6.1-terra"})
+        llm.use_backend(solo)
+        with pytest.raises(LLMError):
+            await llm.ask(
+                ModelSpec(family="openai", model_id="gpt-6.1-terra", provider="openai"),
+                system="s",
+                user="u",
+                schema=Answer,
+                stage="panel",
+            )
+        assert solo.asked == ["gpt-6.1-terra"]
+    finally:
+        llm.use_fallbacks({})
+        llm.reset_calls()

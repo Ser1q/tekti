@@ -132,7 +132,7 @@ DEFAULT_QUESTION_WRITER = DEFAULT_BENCH[0]
 #   gemini-4-carbon        2.00   10.00    0.10     4.00/20.00 from 2026-12-01
 #   gemini-4-argon         2.00   10.00    0.10     4.00/20.00 from 2026-12-01
 #   gemini-4-neon          3.00   15.00    0.15
-#   gemini-4-hydrogen      1.50    7.50    0.075    free tier <- panel seat 3 (when it answers)
+#   gemini-4-hydrogen      1.50    7.50    0.075    free tier <- the only-Google-key setup
 #   gemini-3.8-flash       0.75    3.75    0.075    1.50/7.50 from 2027-01-01
 #   gemini-3.5-flash-lite  0.30    2.50    0.03     free tier <- seat 3 fallback when Gemini 4 is overloaded
 #
@@ -142,7 +142,10 @@ DEFAULT_QUESTION_WRITER = DEFAULT_BENCH[0]
 #                      "worksheet" (with it: stop_reason=refusal, category reasoning_extraction)
 #   gemini-4-hydrogen  review 138-165 s at thinking LOW (default thinking used up the 12k cap in vendors-1);
 #                      a trivial request took >60 s while overloaded
-#   gemini-3.5-flash-lite  review 6-18 s, valid; gemini-4-neon/-carbon, gemini-3.8-flash: no answer in 60 s
+#   gemini-3.5-flash-lite  review 6-18 s, valid, 1-5 findings per review
+#   gemini-4-carbon    <- panel seat 3. 26 Nov 2026 evening: 6 of 6 reviews valid, 12-17 findings each,
+#                      50-196 s; side by side gemini-4-neon gave 9 per review and timed out on 3 of 5;
+#                      gemini-4-hydrogen gave 5-6 and lost 2 of 5 reviews to "high demand"; gemini-3.8-flash failed
 #   segmentation of local/requirements.md: claude-haiku-5-5 thinking off 58 and 62 requirements, 18-35 s;
 #     at effort low 71 (181 s); gpt-6.1-terra low 91 (124 s), off 31; gpt-6-luna low 87; flash-lite 42
 #
@@ -171,22 +174,28 @@ PRICES_PER_1M: dict[str, tuple[float, float]] = {
 _TERRA = ModelSpec(family="openai", model_id="gpt-6.1-terra", provider="openai")
 _HAIKU = ModelSpec(family="anthropic", model_id="claude-haiku-5-5", provider="anthropic")
 _HYDROGEN = ModelSpec(family="google", model_id="gemini-4-hydrogen", provider="google")
+_CARBON = ModelSpec(family="google", model_id="gemini-4-carbon", provider="google")
+_FLASH_LITE = ModelSpec(family="google", model_id="gemini-3.5-flash-lite", provider="google")
 # Strongest first; the order also decides who challenges: a finding raised only by GPT is challenged by
 # Claude, one raised by Claude or Gemini by GPT, one raised by both GPT and Claude by Gemini. Gemini sits
 # last because it is the slowest to answer today (vendors-1: Gemini took 42 challenges, up to 263 s each).
-VENDOR_BENCH: list[ModelSpec] = [_TERRA, _HAIKU, _HYDROGEN]
+VENDOR_BENCH: list[ModelSpec] = [_TERRA, _HAIKU, _CARBON]
 # Role -> preferred models in order; the first whose vendor is configured is used. These hold whatever the
 # panel is (an explicit TEKTI_PANEL does not move them), so segmentation stays comparable across runs.
 VENDOR_ROLES: dict[str, list[ModelSpec]] = {
-    "segmenter": [_HAIKU, _TERRA, _HYDROGEN],
-    "merge_model": [_TERRA, _HAIKU, _HYDROGEN],
-    "question_writer": [_TERRA, _HYDROGEN, _HAIKU],
+    "segmenter": [_HAIKU, _TERRA, _CARBON],
+    "merge_model": [_TERRA, _HAIKU, _CARBON],
+    "question_writer": [_TERRA, _CARBON, _HAIKU],
 }
 # Google as the only vendor (typically a free AI Studio key): both Hydrogen and Flash-Lite have a free tier.
 GOOGLE_ONLY = _HYDROGEN
 # When a Google model does not answer a tiny request within TEKTI_PROBE_TIMEOUT seconds at start-up (Gemini 4
 # answering "high demand"), the next one in this chain takes its place for the whole run.
-GOOGLE_FALLBACKS = ["gemini-4-hydrogen", "gemini-3.5-flash-lite"]
+GOOGLE_FALLBACKS = ["gemini-4-carbon", "gemini-4-hydrogen", "gemini-3.5-flash-lite"]
+# Per call: when one request to a Gemini 4 model fails or runs out of time during the run, that request is
+# sent once to this model instead (tekti.llm.use_fallbacks). It answers in seconds and was never throttled
+# in the runs of 26 Nov 2026, so a loaded Gemini 4 costs one weaker answer, not a lost reviewer.
+GOOGLE_CALL_STAND_IN = _FLASH_LITE
 
 # Thinking level per stage ("provider:stage" overrides "stage"); see llm_backends/providers.py.
 # off = no thinking where the model allows it. Override with TEKTI_REASONING, e.g. "panel=high,challenge=low".
@@ -563,6 +572,13 @@ def install_backend(cfg: Config) -> None:
     from tekti import llm
 
     llm.use_backend(make_backend(cfg))
+    llm.use_fallbacks(
+        {
+            ("google", model_id): GOOGLE_CALL_STAND_IN
+            for model_id in GOOGLE_FALLBACKS
+            if model_id != GOOGLE_CALL_STAND_IN.model_id
+        }
+    )
 
 
 # --------------------------------------------------------------------------- start-up check of Google models
