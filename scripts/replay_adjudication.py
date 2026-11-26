@@ -91,6 +91,10 @@ async def replay(run: Run, no_llm: bool) -> Run:
         run.document, run.requirements, run.raw_findings, cfg, challenger_for=challenger_for
     )
     print("adjudication stats:", adjudicate.last_stats, file=sys.stderr)
+    for line in adjudicate.last_blocked_log:
+        print("  blocked by no-chain rule:", line, file=sys.stderr)
+    for vote in adjudicate.last_severity_votes:
+        print("  severity vote:", " | ".join(vote), file=sys.stderr)
     for line in adjudicate.last_merge_log:
         print("  merged by model:", line, file=sys.stderr)
     for line in adjudicate.last_overturned:

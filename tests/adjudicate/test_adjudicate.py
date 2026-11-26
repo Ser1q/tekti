@@ -876,3 +876,24 @@ async def test_final_merge_tie_prefers_the_conflict(backend):
     assert (confirmed[0].criterion, confirmed[0].title) == (Criterion.SET_CONSISTENT, "Конфликт")
     assert confirmed[0].requirement_ids == ["R-003", "R-006"]
     assert confirmed[0].families == 3  # the gap had more families; the conflict still leads
+
+
+# --------------------------------------------------------------------------- severity of single-family findings
+
+
+def test_agreed_severity_keeps_the_lower_rating():
+    from tekti.adjudicate import agreed_severity
+
+    assert agreed_severity(Severity.CRITICAL, Severity.MAJOR) == Severity.MAJOR
+    assert agreed_severity(Severity.CRITICAL, Severity.CRITICAL) == Severity.CRITICAL
+    assert agreed_severity(Severity.MAJOR, Severity.CRITICAL) == Severity.MAJOR  # one family cannot make it critical
+    assert agreed_severity(Severity.MINOR, None) == Severity.MINOR  # checker gave no rating
+
+
+def test_challenger_is_not_shown_the_reported_severity():
+    from tekti.prompts.challenge import CHALLENGE_SYSTEM
+
+    assert "not shown to you" in CHALLENGE_SYSTEM
+    import inspect
+
+    assert "Заявленная критичность" not in inspect.getsource(adjudicate._render_challenge)

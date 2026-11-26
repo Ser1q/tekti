@@ -41,8 +41,12 @@ Do not reject a real defect because it is small or because a team could probably
 intent; correct its severity instead. Do not uphold a finding only because it sounds plausible: \
 check every claim against the quoted text.
 
-Keep the reported severity unless it clearly fails the tests above; only then set `severity`, \
-otherwise leave it null. Two statements that give different outcomes for the same reachable case \
+Always set `severity` yourself, from the tests above and the document, as if you were the first \
+to see this defect: the first reviewer's rating is not shown to you. Use critical only when work \
+is blocked: ask "can a developer build the stated feature, and can a tester write the test with \
+a definite expected result, without getting this answered first?" If they can start and would \
+only have to guess a detail (a format, a field of an error body, a name, a rarely reached case), \
+it is major. Two statements that give different outcomes for the same reachable case \
 are a conflict and therefore critical, even if the team could decide which one wins: having to \
 decide that is exactly the defect.
 Write `reasoning` first, in Russian, two to four sentences, citing the document's own words \
@@ -52,7 +56,7 @@ in «» quotes. Then give `upheld` and `severity`."""
 class ChallengeAnswer(BaseModel):
     reasoning: str = Field(description="Russian, 2-4 sentences, cites the document's words")
     upheld: bool
-    severity: Severity | None = None
+    severity: Severity | None = Field(default=None, description="your own rating; always set when upheld")
 
 
 MERGE_SYSTEM = """\
@@ -134,6 +138,10 @@ unmarked checklist vs an empty sign-off table);
 - a rule written twice in the document (duplication), and an ambiguity or gap inside that rule;
 - a wrong value in one place, and a different wrong value in another place.
 
+Work through the list requirement by requirement: for every requirement id (and for "весь \
+документ") that appears in two or more findings, compare those findings with each other, whatever \
+their criterion or severity. Findings on the same requirements are where duplicates hide.
+
 Before you put two findings in one group, name the single edit. If your reason needs "and" to \
 join two edits ("add X and describe Y"), they are different defects. Most findings have no \
 duplicate; an empty answer is normal.
@@ -141,7 +149,10 @@ duplicate; an empty answer is normal.
 These usually ARE the same defect: the same wrong value, method or term reported once as a \
 conflict between two places and once as an error in one of those places; the same empty \
 section or placeholder reported under two criteria; the same unlisted status code reported as \
-"missing from the list" and as "used but not described".
+"missing from the list" and as "used but not described"; the same missing operation, contract or \
+rule reported once as "not defined" and once as "section X relies on it but section Y does not \
+provide it"; the same unclear point reported once on one requirement and once on that requirement \
+together with a neighbour.
 
 Return groups of two or more indices, each with a one-line reason in Russian naming the single \
 edit that would resolve the whole group. Each index appears in at most one group. Findings you \

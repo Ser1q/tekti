@@ -66,7 +66,7 @@ A rule finding must be something code can be sure of. When unsure, a rule stays 
 5. **Decide.**
    - raised by two or more families, or by a rule: confirmed;
    - raised by one family: challenged.
-6. **Challenge.** A model from a different family receives the finding, the quoted text with its surrounding section, and one instruction: decide whether the document, read fairly, really has this defect, and say why. It may uphold, reject, or change the severity. Upheld findings are confirmed; rejected ones are kept in the run data with the reasoning but left out of the report body.
+6. **Challenge.** A model from a different family receives the finding, the quoted text with its surrounding section, and one instruction: decide whether the document, read fairly, really has this defect, and say why. It is not shown the reported severity and rates the defect itself. Upheld findings are confirmed; where the two ratings differ the lower one stands, so a defect is never critical on one family's opinion alone. A rejection needs two challengers from different families; rejected findings are kept in the run data with the reasoning but left out of the report body.
 7. **Order.** Confirmed findings are numbered F-001 onward by severity, then by family count, then by position in the document.
 
 ## Questions

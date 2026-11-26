@@ -11,7 +11,8 @@ Implements "Adjudication" in docs/review-design.md:
 4. merge: text from the reviewer with the most evidence, union of evidence, raisers,
    family count, severity by vote (ties go to the higher severity);
 5. decide: two or more families, or a rule, confirm; otherwise
-6. challenge by a model from another family (concurrent, bounded by cfg.max_parallel);
+6. challenge by a model from another family (concurrent, bounded by cfg.max_parallel); the
+   challenger rates severity blind and the lower of the two ratings stands (`agreed_severity`);
 7. order and number: F-001... by severity, family count, document position.
 
 Rejected findings are numbered in their own series X-001..., challenger rejections first
@@ -116,8 +117,12 @@ last_question_drafts: dict[str, list[tuple[str, Role | None]]] = {}
 last_draft_titles: dict[str, str] = {}
 # human-readable record of pairs merged by the grouping model, for tuning
 last_merge_log: list[str] = []
+# pairs the grouping model called the same that the no-chain rule kept apart, for tuning
+last_blocked_log: list[str] = []
 # findings a first challenger rejected and a second upheld, for tuning
 last_overturned: list[str] = []
+# (title, criterion, reported severity, cross-family checker's severity) for every upheld challenge
+last_severity_votes: list[tuple[str, str, str, str]] = []
 
 
 class AdjudicationConfig(Protocol):
@@ -736,6 +741,7 @@ async def _check_pairs(
 
 
 FINAL_PER_CALL = 80
+FINAL_ROUNDS = 2  # one read of a long list misses duplicates; a second read of the shorter list finds more
 
 
 def _render_final(findings: Sequence[Finding], reqs: dict[str, Requirement]) -> str:
@@ -809,7 +815,6 @@ def _render_challenge(finding: Finding, index: DocIndex, reqs: dict[str, Require
         "",
         "<finding>",
         f"Критерий: {c.value} — {NAME_RU[c]}. {DEFINITION_RU[c]}",
-        f"Заявленная критичность: {finding.severity.value}",
     ]
     if finding.requirement_ids:
         parts.append("Требования:")
@@ -877,6 +882,30 @@ def _second_challenger(cfg: Any, pick: ChallengerFor, raised: set[str], first: M
     return None
 
 
+def agreed_severity(reported: Severity, checker: Severity | None) -> Severity:
+    """Severity of a finding only one family raised, after a checker from another family upheld it.
+
+    The checker rates the defect without seeing the reported severity. A severity stands only when
+    two families agree on it, so where they differ the lower one is kept: one model's opinion is
+    never enough to call a defect critical.
+    """
+    if checker is None:
+        return reported
+    return checker if SEVERITY_ORDER[checker] > SEVERITY_ORDER[reported] else reported
+
+
+def _upheld(f: Finding, challenger: str, checker: Severity | None, reasoning: str) -> Finding:
+    final = agreed_severity(f.severity, checker)
+    last_severity_votes.append((f.title, f.criterion.value, f.severity.value, checker.value if checker else "-"))
+    changed = final if final != f.severity else None
+    update: dict[str, Any] = {
+        "challenge": Challenge(challenger=challenger, upheld=True, severity=changed, reasoning=reasoning)
+    }
+    if changed:
+        update["severity"] = changed
+    return f.model_copy(update=update)
+
+
 async def _challenge(
     group: _Group,
     spec: ModelSpec,
@@ -889,11 +918,11 @@ async def _challenge(
 ) -> None:
     """Challenge one single-family finding. A rejection needs two votes.
 
-    First challenger upholds: confirmed (its severity change applies). First rejects: a second
-    challenger from yet another family is asked; the finding is rejected only if it rejects
-    too. If it upholds, the finding is confirmed with its reasoning, and the severity is
-    lowered only when both challengers proposed the same lower severity. With no other family
-    available the single rejection stands. A failed call never rejects.
+    First challenger upholds: confirmed, with the severity from `agreed_severity`. First rejects:
+    a second challenger from yet another family is asked; the finding is rejected only if it
+    rejects too. If it upholds, the finding is confirmed with its reasoning and its rating goes
+    into `agreed_severity`. With no other family available the single rejection stands. A failed
+    call never rejects.
     """
     f = group.finding
     assert f is not None
@@ -906,13 +935,7 @@ async def _challenge(
         return  # stays confirmed, challenge=None, severity unchanged
     r1 = first.reasoning.strip()
     if first.upheld:
-        new_sev = first.severity if first.severity and first.severity != f.severity else None
-        update: dict[str, Any] = {
-            "challenge": Challenge(challenger=spec.model_id, upheld=True, severity=new_sev, reasoning=r1)
-        }
-        if new_sev:
-            update["severity"] = new_sev
-        group.finding = f.model_copy(update=update)
+        group.finding = _upheld(f, spec.model_id, first.severity, r1)
         return
 
     second_spec = _second_challenger(cfg, pick, raised, spec)
@@ -936,27 +959,7 @@ async def _challenge(
     if second.upheld:
         last_stats["rejections_overturned"] += 1
         last_overturned.append(f"{f.severity.value} {f.criterion.value}: {f.title} — отклонил {spec.model_id}: {r1}")
-        lower = (
-            first.severity
-            if first.severity
-            and first.severity == second.severity
-            and SEVERITY_ORDER[first.severity] > SEVERITY_ORDER[f.severity]
-            else None
-        )
-        # One challenger may raise the severity when it upholds (as on a first-vote uphold);
-        # lowering needs both challengers to agree.
-        raised_sev = (
-            second.severity
-            if second.severity and SEVERITY_ORDER[second.severity] < SEVERITY_ORDER[f.severity]
-            else None
-        )
-        final_sev = lower or raised_sev
-        update = {
-            "challenge": Challenge(challenger=second_spec.model_id, upheld=True, severity=final_sev, reasoning=r2)
-        }
-        if final_sev:
-            update["severity"] = final_sev
-        group.finding = f.model_copy(update=update)
+        group.finding = _upheld(f, second_spec.model_id, second.severity, r2)
         return
     group.finding = f.model_copy(
         update={
@@ -1021,7 +1024,9 @@ def _reset_stats() -> None:
     last_question_drafts.clear()
     last_draft_titles.clear()
     last_merge_log.clear()
+    last_blocked_log.clear()
     last_overturned.clear()
+    last_severity_votes.clear()
 
 
 async def merge(
@@ -1160,24 +1165,26 @@ async def merge(
                 continue
             mi, mj = members(ri), members(rj)
 
-            # No chains: every cross pair must be known to be the same defect, or be unjudged,
-            # of the same criterion class and about related requirements. A pair the model
-            # called different blocks it; a cross-class pair needs an explicit "same".
-            def compatible(x: int, y: int) -> bool:
+            # No chains: joining two clusters is decided by every cross pair between them. A pair
+            # the model called the same counts for; a pair it called different, or an unjudged
+            # pair about unrelated requirements, counts against. More for than against merges.
+            # (Severity and class survive any merge: see the never-lower rule in _lead_part.)
+            def vote(x: int, y: int) -> int:
                 pair = (min(x, y), max(x, y))
                 if pair in ok_pairs:
-                    return True
-                if pair in diff_pairs or groups[x].klass != groups[y].klass:
-                    return False
-                return _related_reqs(groups[x].reqs, groups[y].reqs)
+                    return 1
+                if pair in diff_pairs or not _related_reqs(groups[x].reqs, groups[y].reqs):
+                    return -1
+                return 0
 
-            if all(compatible(x, y) for x in mi for y in mj):
+            if sum(vote(x, y) for x in mi for y in mj) > 0:
                 uf.union(i, j)
                 last_stats["cross_bucket_merges"] += 1
                 last_stats["pairs_merged"] += 1
                 last_merge_log.append(f"{groups[i].items[0].raw.title} <=> {groups[j].items[0].raw.title}")
             else:
                 last_stats["pairs_blocked_chain"] += 1
+                last_blocked_log.append(f"{groups[i].items[0].raw.title} <=> {groups[j].items[0].raw.title}")
     merged_groups: list[_Group] = []
     for comp in uf.groups():
         first = groups[comp[0]]
@@ -1196,7 +1203,9 @@ async def merge(
 
     # 4b. final dedup pass over merged findings (before challenges, so a merged group gets
     # its combined family count) ----------------------------------------------------------
-    if len(merged_groups) >= 2:
+    for _ in range(FINAL_ROUNDS):
+        if len(merged_groups) < 2:
+            break
         absorbed: set[int] = set()
         new_groups: list[_Group] = []
         proposals: list[tuple[list[int], str]] = []
@@ -1219,19 +1228,23 @@ async def merge(
 
         # A conflict joined with a gap is the riskiest merge (a contradiction absorbed by an
         # "undefined case" about one of its sentences). It needs a second model's agreement.
-        def lead_of(idxs: list[int]) -> int:
-            return min(
-                idxs,
-                key=lambda k: (
-                    SEVERITY_ORDER[merged_groups[k].finding.severity],  # type: ignore[union-attr]
-                    0 if klass_of(k) == "conflict" else 1,
-                    -merged_groups[k].finding.families,  # type: ignore[union-attr]
-                    -len(merged_groups[k].finding.evidence),  # type: ignore[union-attr]
-                ),
-            )
+        current = merged_groups  # bound here: the helpers below are used only within this round
 
-        def klass_of(k: int) -> str:
-            return criterion_class(merged_groups[k].finding.criterion)  # type: ignore[union-attr]
+        def klass_of(k: int, gs: list[_Group] = current) -> str:
+            return criterion_class(gs[k].finding.criterion)  # type: ignore[union-attr]
+
+        def lead_of(idxs: list[int], gs: list[_Group] = current) -> int:
+            def key(idx: int) -> tuple[int, int, int, int]:
+                f = gs[idx].finding
+                assert f is not None
+                return (
+                    SEVERITY_ORDER[f.severity],
+                    0 if klass_of(idx) == "conflict" else 1,
+                    -f.families,
+                    -len(f.evidence),
+                )
+
+            return min(idxs, key=key)
 
         risky: list[tuple[int, int]] = []
         for accepted, _ in proposals:
@@ -1252,6 +1265,11 @@ async def merge(
             keep = [k for k in accepted if verified.get((lead_k, k), True)]
             dropped = [k for k in accepted if k not in keep]
             if dropped:
+                # Remember the refusal, so a later round cannot join what the verifier kept apart.
+                for d in dropped:
+                    for part_a in merged_groups[lead_k].parts:
+                        for part_b in merged_groups[d].parts:
+                            diff_pairs.add((min(part_a.gid, part_b.gid), max(part_a.gid, part_b.gid)))
                 last_stats["final_rejected_by_verifier"] += len(dropped)
                 last_merge_log.append(
                     "final, not confirmed by second model: "
@@ -1278,6 +1296,8 @@ async def merge(
             last_merge_log.append(f"final: {names} — {reason}")
         merged_groups = [g for k, g in enumerate(merged_groups) if k not in absorbed] + new_groups
         last_stats["groups"] = len(merged_groups)
+        if not new_groups:
+            break  # a round that merged nothing ends the pass
 
     # 5-6. decide and challenge ----------------------------------------------------------
     tasks = []
