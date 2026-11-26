@@ -19,48 +19,111 @@
 uv sync
 ```
 
-### Вариант А — бесплатный ключ Gemini API (Google AI Studio)
+### Модели по умолчанию
 
-Не требует платной подписки или аккаунта AWS.
+Коллегия — три независимых семейства моделей у трёх разных поставщиков; каждая модель вызывается через API своего поставщика (OpenAI, Anthropic, Google). AWS нужен только для размещения шлюза автора.
 
-1. Получите бесплатный API-ключ в Google AI Studio: [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
-2. Скопируйте шаблон конфигурации и вставьте свой ключ в `TEKTI_API_KEY`:
-   ```bash
-   cp .env.example .env
-   ```
-   В `.env.example` уже преднастроен профиль для Google AI Studio через OpenAI-совместимый эндпоинт:
-   - `TEKTI_PROVIDER=openai_compatible`
-   - `TEKTI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/`
-   - `TEKTI_PANEL=google:gemini-2.5-flash` (при необходимости можно указать, например, `google:gemini-2.5-pro`)
-3. Запустите проверку одной командой:
-   ```bash
-   uv run tekti path/to/requirements.md path/to/report.md --mode fast
-   ```
+| Роль | Модель | Поставщик |
+| :--- | :--- | :--- |
+| Коллегия, место 1 (в режиме `fast` — единственное) | `gpt-6.1-terra` | OpenAI |
+| Коллегия, место 2 | `claude-haiku-5-5` | Anthropic |
+| Коллегия, место 3 | `gemini-4-hydrogen`, при перегрузке — `gemini-3.5-flash-lite` | Google |
+| Нарезка требований (`TEKTI_SEGMENTER`) | `claude-haiku-5-5`, без рассуждений | Anthropic |
+| Группировка замечаний (`TEKTI_MERGE_MODEL`) | `gpt-6.1-terra` | OpenAI |
+| Уточняющие вопросы (`TEKTI_QUESTION_WRITER`) | `gpt-6.1-terra` | OpenAI |
 
-### Вариант Б — полный консилиум моделей на Amazon Bedrock (режим по умолчанию `board`)
+Явный `TEKTI_PANEL` меняет только коллегию: нарезка, группировка и вопросы остаются на своих моделях, чтобы прогоны можно было сравнивать.
 
-Использует стандартную цепочку учётных данных AWS (`AWS_PROFILE` или `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, регион по умолчанию `us-east-1`) при `TEKTI_PROVIDER=bedrock` (значение по умолчанию).
+Перекрёстную проверку (`challenge`) выполняет первая по порядку модель коллегии из семейства, которое замечание не поднимало: замечания GPT проверяет Claude, замечания Claude и Gemini — GPT, замечания, поднятые и GPT, и Claude, — Gemini. Gemini стоит последней, потому что сейчас отвечает медленнее всех.
 
-По умолчанию в `src/tekti/config.py` настроены независимые семейства моделей:
+Перед проверкой Tekti отправляет модели Google короткий запрос; если `gemini-4-hydrogen` не ответила за 25 секунд (Google отвечает «high demand»), на весь прогон её заменяет `gemini-3.5-flash-lite`, и это видно в паспорте прогона (`TEKTI_PROBE_TIMEOUT`, `0` отключает проверку).
 
-- **Нарезка требований** (`DEFAULT_SEGMENTER` / `TEKTI_SEGMENTER`):
-  `us.anthropic.claude-haiku-4-5-20251001-v1:0` (Anthropic)
-- **Коллегия рецензентов** (`DEFAULT_BENCH` / `TEKTI_PANEL`, в режиме `board` берутся первые 3 семейства):
-  1. `anthropic:us.anthropic.claude-haiku-4-5-20251001-v1:0` (Anthropic)
-  2. `openai:openai.gpt-oss-120b-1:0` (OpenAI)
-  3. `moonshot:us.moonshotai.kimi-k3.1` (Moonshot)
-  - Дополнительные семейства в `DEFAULT_BENCH` (для перекрёстной проверки и расширения списка): `mistral:mistral.mistral-large-3-675b-instruct` (Mistral), `qwen:qwen.qwen3-vl-235b-a22b` (Qwen).
-- **Формулировка уточняющих вопросов** (`DEFAULT_QUESTION_WRITER` / `TEKTI_QUESTION_WRITER`):
-  `us.anthropic.claude-haiku-4-5-20251001-v1:0` (Anthropic)
+Глубина рассуждений задаётся по этапам (`TEKTI_REASONING`, по умолчанию: нарезка — без рассуждений, коллегия — `medium`, у Gemini — `low`, перекрёстная проверка и группировка — `low`, вопросы — `medium`); к лимиту ответа автоматически добавляется место под рассуждения.
 
-> Любую из моделей по умолчанию можно переопределить через `.env` или переменные окружения (см. закомментированный блок для Bedrock в `.env.example`).
+Честно о составе: место Anthropic занимает малая модель (Haiku 5.5), а место Google при перегрузке Gemini 4 — самая лёгкая Gemini (Flash-Lite). Три семейства на коллегии остаются независимыми, но эти голоса слабее, чем у GPT. Прогон `board` 26.11.2026 (Gemini 4 Hydrogen была перегружена, работала Flash-Lite) стоил **$0.52** (OpenAI $0.40, Anthropic $0.08, Google $0.05) и занял около 6 минут; с Hydrogen на месте Google — примерно на $0.30 дороже (оценка). Таблица цен и расчёт — в комментарии в `src/tekti/config.py`; `tekti.config.estimate_cost(run.calls)` считает стоимость по токенам прогона.
 
-Запуск проверки (Markdown или PDF):
+Проверить, что все модели отвечают (один короткий запрос на модель; ключи не выводятся):
 
 ```bash
-uv run tekti path/to/requirements.md path/to/report.md
-uv run tekti path/to/requirements.pdf path/to/report.md
+uv run python scripts/smoke_providers.py
 ```
+
+### Вариант А — через шлюз автора, вход через GitHub
+
+Ключи поставщиков остаются у автора, и вам ничего не нужно получать: вы подтверждаете, кто вы, своим аккаунтом GitHub, а шлюз выдаёт сессию на 24 часа.
+
+1. Укажите адрес шлюза в `.env` (или в окружении):
+   ```bash
+   TEKTI_GATEWAY_URL=https://ogy3dekojptszeoxe33vuqjp5y0ngjyp.lambda-url.us-east-1.on.aws
+   ```
+2. Войдите:
+   ```bash
+   uv run tekti login
+   ```
+   Tekti покажет код и адрес `https://github.com/login/device` (и попробует открыть его в браузере). Введите код, подтвердите вход — приложение не запрашивает никаких прав, кроме чтения публичного профиля.
+3. Запустите проверку:
+   ```bash
+   uv run tekti path/to/requirements.md path/to/report.md
+   ```
+
+`uv run tekti whoami` показывает логин и срок сессии, `uv run tekti logout` удаляет сессию. Сессия хранится в `~/.config/tekti/session.json` (или `$XDG_CONFIG_HOME/tekti/`, на Windows `%APPDATA%\tekti\`) с доступом только для владельца; токен GitHub после входа не сохраняется.
+
+Все модели OpenAI, Anthropic и Google идут через шлюз, даже если в окружении заданы и ключи поставщиков. Если сессия истекла, логина нет в списке допуска или исчерпан лимит запросов, проверка останавливается одной строкой с указанием, что делать (войти снова, попросить автора добавить логин или перейти на свои ключи / бесплатный ключ Gemini, варианты Б и В).
+
+**Для автора: регистрация OAuth-приложения GitHub.** GitHub → аватар → **Settings** → **Developer settings** → **OAuth Apps** → **New OAuth App** (или **Register a new application**). Заполните **Application name**, **Homepage URL** (например, адрес репозитория) и **Authorization callback URL** (для device flow не используется, подойдёт тот же адрес), отметьте **Enable Device Flow**, оставьте **Expire user access tokens** включённым и нажмите **Register application**. Скопируйте **Client ID** (он публичный; client secret не нужен и не создаётся для Tekti) в `DEFAULT_GITHUB_CLIENT_ID` в `src/tekti/config.py` или в переменную `TEKTI_GITHUB_CLIENT_ID`. Сам автор может вместо входа через GitHub задать `TEKTI_GATEWAY_TOKEN` (токен владельца шлюза) — он главнее сохранённой сессии.
+
+### Вариант Б — со своими ключами поставщиков
+
+```bash
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+GOOGLE_API_KEY=...        # или GEMINI_API_KEY
+```
+
+Используются модели по умолчанию из таблицы выше. Если задана только часть ключей, коллегия собирается из доступных поставщиков (с двумя ключами — два семейства, режим `board` тогда работает как `standard`), а роли переходят к доступной модели.
+
+### Вариант В — только бесплатный ключ Gemini (сокращённая коллегия)
+
+Не требует оплаты и аккаунта AWS. Получите ключ в Google AI Studio: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) и задайте только его:
+
+```bash
+GOOGLE_API_KEY=...
+```
+
+Все роли выполняет `gemini-4-hydrogen`, при перегрузке — `gemini-3.5-flash-lite` (у обеих есть бесплатный уровень; у `gemini-4-neon` его нет), параллельность по умолчанию снижена до 2 из-за лимитов бесплатного уровня. **Это заметно слабее полной коллегии:** одно семейство, перекрёстная проверка тем же семейством, нет независимых «вторых мнений». Кроме того, по условиям Google данные бесплатного уровня могут использоваться для улучшения продуктов Google — не отправляйте так конфиденциальные документы.
+
+```bash
+uv run tekti path/to/requirements.md path/to/report.md --mode fast
+```
+
+### Вариант Г — Amazon Bedrock (прежний режим)
+
+Использует стандартную цепочку учётных данных AWS (`AWS_PROFILE` или `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, регион по умолчанию `us-east-1`). Включается явно `TEKTI_PROVIDER=bedrock` или сам собой, если не задан ни шлюз, ни ключи поставщиков.
+
+Модели Bedrock по умолчанию (`DEFAULT_BENCH` в `src/tekti/config.py`; учётная запись автора не получила доступа к сильным моделям, отсюда состав):
+
+- **Нарезка требований и уточняющие вопросы**: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (Anthropic)
+- **Коллегия** (в режиме `board` первые 3): `anthropic:us.anthropic.claude-haiku-4-5-20251001-v1:0`, `openai:openai.gpt-oss-120b-1:0`, `mistral:mistral.mistral-large-3-675b-instruct`; на скамейке для перекрёстной проверки — `qwen:qwen.qwen3-vl-235b-a22b`, `moonshot:us.moonshotai.kimi-k3.1`.
+
+```bash
+TEKTI_PROVIDER=bedrock uv run tekti path/to/requirements.md path/to/report.md
+```
+
+### Какие настройки главнее
+
+1. Явные `TEKTI_PANEL`, `TEKTI_SEGMENTER`, `TEKTI_MERGE_MODEL`, `TEKTI_QUESTION_WRITER`.
+2. `TEKTI_PROVIDER`, если задан (`vendors`, `bedrock`, `openai_compatible`), выбирает набор умолчаний.
+3. Иначе (`auto`): шлюз, если задан `TEKTI_GATEWAY_URL` (с токеном владельца или сессией `tekti login`); иначе ключи поставщиков; иначе Bedrock.
+
+### Формат записи модели
+
+`[провайдер:][семейство:]model_id`, где провайдер — `openai`, `anthropic`, `google`, `bedrock` или `openai_compatible`. Модели разных провайдеров можно смешивать в одной коллегии:
+
+```bash
+TEKTI_PANEL=google:gemini-4-carbon,openai:gpt-6.2-sol,bedrock:mistral:mistral.mistral-large-3-675b-instruct
+```
+
+Прежняя запись `семейство:model_id` работает как раньше: `openai:openai.gpt-oss-120b-1:0` и `us.anthropic.claude-…` остаются моделями Bedrock в любом режиме (идентификатор вида `<поставщик>.<модель>` распознаётся как Bedrock). Префиксы `openai:`, `anthropic:`, `google:` означают API поставщика только в режиме поставщиков (шлюз, ключи или `TEKTI_PROVIDER=vendors`); в режиме `bedrock` это по-прежнему имя семейства.
 
 ---
 
@@ -91,16 +154,21 @@ uv run tekti <input> <report> [--mode {fast,standard,board}] [--run-json <path>]
 
 | Переменная | Назначение и значение по умолчанию |
 | :--- | :--- |
-| `TEKTI_PROVIDER` | Провайдер моделей: `bedrock` (по умолчанию) или `openai_compatible`. |
-| `TEKTI_BACKEND` | Бэкенд вызова: `strands` (по умолчанию) или `converse` (`converse` только для `bedrock`). |
+| `TEKTI_GATEWAY_URL` | Адрес шлюза; если задан, все модели OpenAI, Anthropic и Google идут через него (вход — `tekti login`). |
+| `TEKTI_GATEWAY_TOKEN` | Токен владельца шлюза (только для автора); главнее сохранённой сессии GitHub. Не выводится и не логируется. |
+| `TEKTI_GITHUB_CLIENT_ID` | Client ID OAuth-приложения GitHub для `tekti login` (по умолчанию встроенный). |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` (или `GEMINI_API_KEY`) | Ключи для прямых вызовов поставщиков (без шлюза). Не выводятся и не логируются. |
+| `TEKTI_PROVIDER` | Набор умолчаний: `auto` (по умолчанию: шлюз → ключи поставщиков → Bedrock), `vendors`, `bedrock` или `openai_compatible`. |
+| `TEKTI_BACKEND` | Бэкенд вызова: `strands` (по умолчанию) или `converse` (`converse` обслуживает только модели Bedrock, остальные идут через Strands). |
 | `TEKTI_REGION` | AWS-регион для Bedrock (по умолчанию `AWS_REGION`, затем `AWS_DEFAULT_REGION`, затем `us-east-1`). |
-| `TEKTI_PANEL` | Список моделей через запятую в формате `family:model_id` (по одному на семейство, сильнейшие первыми). Обязательна при `TEKTI_PROVIDER=openai_compatible`. |
-| `TEKTI_SEGMENTER` | Модель для нарезки требований (`family:model_id` или `model_id`). |
-| `TEKTI_QUESTION_WRITER` | Модель для формулировки уточняющих вопросов (`family:model_id` или `model_id`). |
+| `TEKTI_PANEL` | Модели через запятую в формате `[провайдер:][семейство:]model_id` (по одной на семейство, сильнейшие первыми; см. «Формат записи модели»). Обязательна при `TEKTI_PROVIDER=openai_compatible`. |
+| `TEKTI_SEGMENTER` | Модель для нарезки требований. |
+| `TEKTI_MERGE_MODEL` | Модель для группировки повторяющихся замечаний (по умолчанию — модель уточняющих вопросов; в умолчаниях поставщиков — `gpt-6.1-terra`). |
+| `TEKTI_QUESTION_WRITER` | Модель для формулировки уточняющих вопросов. |
 | `TEKTI_LENSES` | Список углов проверки через запятую (по умолчанию все 5: `functional,api_contract,data_integration,tester,developer`). |
-| `TEKTI_MAX_PARALLEL` | Максимум параллельных вызовов коллегии (по умолчанию `6`). |
-| `TEKTI_MAX_OUTPUT_TOKENS` | Лимит выходных токенов на один вызов модели (по умолчанию `12000`). |
-| `TEKTI_BASE_URL` | URL OpenAI-совместимого эндпоинта (обязателен при `TEKTI_PROVIDER=openai_compatible`, например `https://generativelanguage.googleapis.com/v1beta/openai/` или `http://localhost:11434/v1`). |
+| `TEKTI_MAX_PARALLEL` | Максимум параллельных вызовов (по умолчанию `6`; `2`, если единственный поставщик — Google). |
+| `TEKTI_MAX_OUTPUT_TOKENS` | Лимит выходных токенов на один вызов модели, включая рассуждения (по умолчанию `12000`). |
+| `TEKTI_BASE_URL` | URL OpenAI-совместимого эндпоинта (для моделей `openai_compatible`, например `http://localhost:11434/v1` для Ollama). |
 | `TEKTI_API_KEY` | API-ключ для `TEKTI_BASE_URL` (никогда не выводится и не логируется). |
 
 ---

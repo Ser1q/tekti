@@ -1,4 +1,4 @@
-"""Strands Agents backend (default).
+"""Strands Agents backend (default): one backend, the provider chosen per model (`ModelSpec.provider`).
 
 Verified against strands-agents 1.67 (source and https://strandsagents.com docs):
   * `Agent(model=..., system_prompt=..., tools=None, callback_handler=None)`; `callback_handler=None`
@@ -7,44 +7,81 @@ Verified against strands-agents 1.67 (source and https://strandsagents.com docs)
     `AgentResult` whose `.structured_output` is a validated instance of `Schema`. Invalid tool input
     is sent back to the model by Strands; `limits={"structured_output_attempts": 2}` caps that at one
     repair. When the cap is hit the result has no structured output (or StructuredOutputException).
-  * Token usage: `result.metrics.accumulated_usage["inputTokens" | "outputTokens"]`.
-  * Throttling: `ModelRetryStrategy` retries `ModelThrottledException`; we widen it to timeouts and
-    5xx codes, and botocore adaptive retries sit underneath.
+  * Token usage: `result.metrics.accumulated_usage["inputTokens" | "outputTokens"]`, summed over every
+    model request the agent made (repair included). Anthropic reports cache reads/writes apart from
+    inputTokens; they are added back here.
+  * Throttling: `ModelRetryStrategy` retries `ModelThrottledException`; we widen it to timeouts,
+    connection drops and 5xx of every vendor SDK, and never retry a refusal by the Tekti gateway.
+
+How each provider's model is built (URLs, structured output, streaming, usage): see `providers.py`.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from tekti.llm import LLMError, ModelSpec
-from tekti.llm_backends._common import RETRYABLE_CODES, error_code, is_temperature_rejection
+from tekti.llm_backends._common import (
+    GatewayRefused,
+    gateway_refusal,
+    is_retryable,
+    is_temperature_rejection,
+    sends_temperature,
+)
+from tekti.llm_backends.providers import VendorEndpoint, build_model
 
 T = TypeVar("T", bound=BaseModel)
 
 STRUCTURED_OUTPUT_ATTEMPTS = 2  # first answer + one repair
 
+# The backend only sees the output schema, so the stage is read from it. Unknown schemas use "default".
+SCHEMA_STAGE = {
+    "ReviewerOutput": "panel",
+    "SegmentOutput": "segment",
+    "ChallengeAnswer": "challenge",
+    "MergeAnswer": "merge",
+    "PairAnswer": "merge",
+    "FinalDedupAnswer": "merge",
+    "QuestionsAnswer": "questions",
+}
+
+
+def stage_of(schema: type) -> str:
+    return SCHEMA_STAGE.get(getattr(schema, "__name__", ""), "default")
+
+
+RETRY_INITIAL_DELAY = 2  # seconds; tests set 0
+
 
 def _retry_strategy() -> Any:
     from strands.agent import ModelRetryStrategy  # type: ignore[attr-defined]
-    from strands.types.exceptions import ModelThrottledException
 
     class _Retry(ModelRetryStrategy):
         def is_retryable(self, exception: Exception) -> bool:
-            if isinstance(exception, ModelThrottledException):
-                return True
-            if error_code(exception) in RETRYABLE_CODES:
-                return True
-            name = type(exception).__name__
-            return name in {"ReadTimeoutError", "ConnectTimeoutError", "APITimeoutError", "RateLimitError"}
+            return is_retryable(exception)
 
-    return _Retry(max_attempts=5, initial_delay=2, max_delay=30)
+    return _Retry(max_attempts=5, initial_delay=RETRY_INITIAL_DELAY, max_delay=30)
+
+
+def usage_tokens(usage: Mapping[str, Any]) -> tuple[int, int]:
+    """(input, output) tokens from a Strands usage dict. Input includes cache reads and writes when the
+    provider reports them apart (Anthropic); OpenAI and Gemini already count cached tokens in inputTokens."""
+    tokens_in = int(usage.get("inputTokens", 0) or 0)
+    tokens_out = int(usage.get("outputTokens", 0) or 0)
+    return tokens_in, tokens_out
 
 
 class StrandsBackend:
-    """`tekti.llm.Backend` on the Strands Agents SDK. Safe to call concurrently under asyncio."""
+    """`tekti.llm.Backend` on the Strands Agents SDK. Safe to call concurrently under asyncio.
+
+    Dispatches on `ModelSpec.provider`, so one run can mix Bedrock, OpenAI, Anthropic, Google and an
+    OpenAI-compatible endpoint. `vendors` maps "openai"/"anthropic"/"google" to how that vendor is reached
+    (vendor key directly, or the Tekti gateway with its token).
+    """
 
     def __init__(
         self,
@@ -52,69 +89,59 @@ class StrandsBackend:
         region: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
+        vendors: Mapping[str, VendorEndpoint] | None = None,
         read_timeout: int = 300,
+        reasoning: Mapping[str, str] | None = None,
     ) -> None:
         self._region = region
         self._base_url = base_url
         self._api_key = api_key
+        self._vendors = dict(vendors or {})
         self._read_timeout = read_timeout
-        self._models: dict[tuple[str, str, int, bool], Any] = {}
-        self._no_temperature: set[str] = set()
+        self._reasoning = dict(reasoning or {})  # stage -> low/medium/high
+        self._models: dict[tuple[str, str, int, bool, str | None], Any] = {}
+        self._no_temperature: set[tuple[str, str]] = set()
+        self._refused: GatewayRefused | None = None
+
+    def __repr__(self) -> str:
+        return f"StrandsBackend(region={self._region!r}, vendors={self._vendors!r})"
 
     # ------------------------------------------------------------------ model construction
 
-    def _model(self, spec: ModelSpec, max_tokens: int) -> Any:
-        use_temp = spec.model_id not in self._no_temperature
-        key = (spec.provider, spec.model_id, max_tokens, use_temp)
+    def _uses_temperature(self, spec: ModelSpec) -> bool:
+        return (spec.provider, spec.model_id) not in self._no_temperature and sends_temperature(
+            spec.provider, spec.model_id
+        )
+
+    def _level(self, provider: str, stage: str) -> str | None:
+        r = self._reasoning
+        return r.get(f"{provider}:{stage}") or r.get(stage) or r.get(f"{provider}:default") or r.get("default")
+
+    def _model(self, spec: ModelSpec, max_tokens: int, stage: str = "default") -> Any:
+        use_temp = self._uses_temperature(spec)
+        level = self._level(spec.provider, stage)
+        key = (spec.provider, spec.model_id, max_tokens, use_temp, level)
         if key in self._models:
             return self._models[key]
-        if spec.provider == "bedrock":
-            from botocore.config import Config as BotoConfig
-            from strands.models import BedrockModel
-
-            kwargs: dict[str, Any] = {
-                "model_id": spec.model_id,
-                "max_tokens": max_tokens,  # always explicit: unset reserves the model maximum of quota
-                "streaming": False,
-                "boto_client_config": BotoConfig(
-                    retries={"max_attempts": 4, "mode": "adaptive"},
-                    connect_timeout=10,
-                    read_timeout=self._read_timeout,
-                ),
-            }
-            if self._region:
-                kwargs["region_name"] = self._region
-            if use_temp:
-                kwargs["temperature"] = 0.0
-            model = BedrockModel(**kwargs)
-        elif spec.provider == "openai_compatible":
-            from strands.models.openai import OpenAIModel
-
-            if not self._base_url:
-                raise LLMError("openai_compatible provider needs TEKTI_BASE_URL")
-            params: dict[str, Any] = {"max_tokens": max_tokens}
-            if use_temp:
-                params["temperature"] = 0.0
-            model = OpenAIModel(
-                client_args={
-                    "base_url": self._base_url,
-                    "api_key": self._api_key or "unused",  # Ollama ignores the key but the client wants one
-                    "max_retries": 4,
-                    "timeout": float(self._read_timeout),
-                },
-                model_id=spec.model_id,
-                params=params,
-            )
-        else:  # pragma: no cover - ModelSpec restricts the literal
-            raise LLMError(f"unknown provider {spec.provider}")
+        model = build_model(
+            spec,
+            max_tokens=max_tokens,
+            use_temperature=use_temp,
+            endpoint=self._vendors.get(spec.provider),
+            region=self._region,
+            compat_base_url=self._base_url,
+            compat_api_key=self._api_key,
+            read_timeout=self._read_timeout,
+            reasoning=level,
+        )
         self._models[key] = model
         return model
 
-    def _agent(self, spec: ModelSpec, system: str, max_tokens: int) -> Any:
+    def _agent(self, spec: ModelSpec, system: str, max_tokens: int, stage: str = "default") -> Any:
         from strands import Agent
 
         return Agent(
-            model=self._model(spec, max_tokens),
+            model=self._model(spec, max_tokens, stage),
             system_prompt=system,
             tools=None,
             callback_handler=None,
@@ -126,13 +153,32 @@ class StrandsBackend:
     async def complete(
         self, model: ModelSpec, *, system: str, user: str, schema: type[T], max_tokens: int
     ) -> tuple[T, int, int]:
+        """Raises GatewayRefused (a BaseException, so the run stops) on a gateway 4xx; after the first one,
+        every later call raises it at once without a request, so concurrent reviewers do not pile up refusals."""
+        if self._refused is not None:
+            raise GatewayRefused(self._refused.status, self._refused.code, self._refused.message)
+        try:
+            return await self._complete_with_temperature_fallback(
+                model, system=system, user=user, schema=schema, max_tokens=max_tokens
+            )
+        except Exception as exc:
+            refusal = gateway_refusal(exc)
+            if refusal is None:
+                raise
+            self._refused = refusal
+            raise refusal from exc
+
+    async def _complete_with_temperature_fallback(
+        self, model: ModelSpec, *, system: str, user: str, schema: type[T], max_tokens: int
+    ) -> tuple[T, int, int]:
+        used_temperature = self._uses_temperature(model)
         try:
             return await self._complete_once(model, system=system, user=user, schema=schema, max_tokens=max_tokens)
         except LLMError:
             raise
         except Exception as exc:
-            if model.model_id not in self._no_temperature and is_temperature_rejection(exc):
-                self._no_temperature.add(model.model_id)
+            if used_temperature and is_temperature_rejection(exc):
+                self._no_temperature.add((model.provider, model.model_id))
                 return await self._complete_once(model, system=system, user=user, schema=schema, max_tokens=max_tokens)
             raise
 
@@ -141,7 +187,7 @@ class StrandsBackend:
     ) -> tuple[T, int, int]:
         from strands.types.exceptions import StructuredOutputException
 
-        agent = self._agent(model, system, max_tokens)  # fresh agent: no shared conversation state
+        agent = self._agent(model, system, max_tokens, stage_of(schema))  # fresh agent: no shared state
         try:
             result = await agent.invoke_async(
                 user,
@@ -151,7 +197,11 @@ class StrandsBackend:
         except StructuredOutputException as exc:
             raise LLMError(f"output does not match schema {schema.__name__} after one repair: {exc}") from exc
         usage = result.metrics.accumulated_usage
-        tokens_in, tokens_out = int(usage.get("inputTokens", 0)), int(usage.get("outputTokens", 0))
+        tokens_in, tokens_out = usage_tokens(usage)
+        if model.provider == "anthropic":
+            tokens_in += int(usage.get("cacheReadInputTokens", 0) or 0) + int(
+                usage.get("cacheWriteInputTokens", 0) or 0
+            )
         parsed = result.structured_output
         if parsed is None:
             raise LLMError(

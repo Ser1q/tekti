@@ -156,8 +156,8 @@ def strands_with(outcomes):
     agents = []
     queue = list(outcomes)
 
-    def fake_agent(spec, system, max_tokens):
-        agents.append((spec.model_id, spec.model_id in backend._no_temperature, max_tokens))
+    def fake_agent(spec, system, max_tokens, stage="default"):
+        agents.append((spec.model_id, (spec.provider, spec.model_id) in backend._no_temperature, max_tokens))
         agent = FakeAgent(queue.pop(0))
         agents[-1] = (*agents[-1], agent)
         return agent

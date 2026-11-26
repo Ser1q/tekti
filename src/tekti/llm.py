@@ -20,7 +20,9 @@ T = TypeVar("T", bound=BaseModel)
 class ModelSpec(BaseModel):
     family: str  # "anthropic", "openai", "xai", ... used for vote counting and challenger choice
     model_id: str  # provider-specific identifier
-    provider: Literal["bedrock", "openai_compatible"] = "bedrock"
+    # "openai", "anthropic" and "google" use each vendor's own API (directly with the vendor key, or through
+    # the Tekti gateway); "openai_compatible" is any other endpoint speaking the OpenAI protocol (Ollama etc.).
+    provider: Literal["bedrock", "openai", "anthropic", "google", "openai_compatible"] = "bedrock"
 
 
 class LLMError(Exception):
@@ -54,6 +56,16 @@ def reset_calls() -> None:
     _calls.clear()
 
 
+def call_timeout_seconds() -> float:
+    """Wall-clock limit for one `ask`, retries included. TEKTI_CALL_TIMEOUT overrides the default of 300 s."""
+    import os
+
+    try:
+        return max(10.0, float(os.environ.get("TEKTI_CALL_TIMEOUT", "300")))
+    except ValueError:
+        return 300.0
+
+
 async def ask(
     model: ModelSpec,
     *,
@@ -70,14 +82,18 @@ async def ask(
     caller in <document>...</document> and described there as data to be reviewed.
     Records a ModelCall whether the call succeeds or fails. Raises LLMError on failure.
     """
+    import asyncio
     import time
 
     if _backend is None:
         raise LLMError("no backend installed; call tekti.llm.use_backend first")
     started = time.monotonic()
     try:
-        parsed, tokens_in, tokens_out = await _backend.complete(
-            model, system=system, user=user, schema=schema, max_tokens=max_tokens
+        # One call may not stall the run: a vendor that keeps answering "overloaded" can otherwise hold a
+        # reviewer for many minutes of retries. On the deadline the reviewer is dropped and recorded.
+        parsed, tokens_in, tokens_out = await asyncio.wait_for(
+            _backend.complete(model, system=system, user=user, schema=schema, max_tokens=max_tokens),
+            timeout=call_timeout_seconds(),
         )
     except Exception as exc:
         _calls.append(

@@ -301,5 +301,8 @@ def test_each_lens_has_its_own_method():
     prompts = {lens: system_prompt(lens) for lens in Lens}
     assert len(set(prompts.values())) == len(Lens)
     for lens in (Lens.TESTER, Lens.DEVELOPER):
-        assert "worksheet" in prompts[lens]
+        # No visible scratch field: asking a model to write out its working draft is refused by Anthropic
+        # models (stop_reason=refusal, category reasoning_extraction), found on Claude Haiku 5.5 and Sonnet 5.5.
+        assert "worksheet" not in prompts[lens]
+        assert "черновик" not in prompts[lens]
         assert "question обязательно" in prompts[lens]

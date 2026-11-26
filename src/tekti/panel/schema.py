@@ -58,15 +58,6 @@ class ReviewerFinding(BaseModel):
 
 
 class ReviewerOutput(BaseModel):
-    # Scratch space so models without built-in reasoning actually do the cross-checks before
-    # writing findings. Code discards it; it never reaches the report.
-    worksheet: str = Field(
-        default="",
-        description=(
-            "Рабочий черновик сверки по методу вашего угла: коротко, по строке на проверку, не более 40 строк. "
-            "Заполняется ДО списка находок. В отчёт не попадает."
-        ),
-    )
     findings: list[ReviewerFinding] = Field(
         default_factory=list,
         description="Все найденные дефекты в пределах вашего угла. Пустой список, если дефектов нет.",
