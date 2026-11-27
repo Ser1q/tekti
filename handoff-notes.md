@@ -1,3 +1,8 @@
+> **Historical, 27 November 2026.** Working notes from 26 November. Superseded: the Bedrock default panel,
+> segmenter and question writer in "P0" (defaults are now `gpt-6.1-terra`, `claude-haiku-5-5`,
+> `gemini-4-carbon`, see README.md); the README contents described in "P10"; and in "P5 adjudication round 3",
+> the challenge severity rule (the challenger now rates severity without seeing the reported one, and the
+> lower of the two ratings stands). The final dedup pass now runs up to two rounds.
 
 ## P1-md Markdown ingestion (main orchestrator)
 - Built: `tekti.ingest.load` (dispatch .md/.markdown/.txt → markdown, .pdf → lazy `tekti.ingest.pdf.load_pdf` with a Russian "PDF support not installed" error, else a Russian error) and `ingest/markdown.py`, a line-based splitter (headings, paragraphs, list items, table rows, fenced code) with section paths and exact 1-based lines. Block text is the raw source text with markup kept (table rows keep their pipes, headings keep "###", list items keep "* "), because gold quotes cite markup.

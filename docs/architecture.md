@@ -23,7 +23,7 @@ Tekti is a fixed pipeline whose reviewing steps are agents. A document passes th
 2. **Segment.** The text is split into atomic requirements. Document identifiers are kept; unnumbered requirements get new ones. Each carries its exact quote.
 3. **Rules.** Code, not a model, checks what code can check: empty sections, weak wording, units, and a table of facts (ranges, types, status codes) compared across the parts of the document.
 4. **Panel.** Five review angles (functional, API contract, data and integration, tester, developer) are each run by three model families: fifteen reviewers in parallel. The tester tries to derive test cases and the developer tries to derive the contract; whatever they are forced to assume becomes a finding.
-5. **Adjudicate.** Findings are grouped by the requirement and the quality criterion they concern, so merging is mechanical and each group has a vote count. Every quote is checked against the source in code. Groups with weak support are challenged by a model from a different family than the one that raised them.
+5. **Adjudicate.** Findings are grouped by the requirement and the quality criterion they concern, so merging is mechanical and each group has a vote count. Every quote is checked against the source in code. Groups raised by one family only are challenged by a model from a different family than the one that raised them.
 6. **Questions.** Surviving findings become clarifying questions, deduplicated, ranked by what they block, each addressed to a role.
 7. **Report.** A template renders the Russian report from the run data. The verdict and all counts are computed in code.
 
@@ -35,8 +35,8 @@ Three modes use the same pipeline: `fast` (one family), `standard`, `board` (ful
 
 - **Python with uv.** Already the builder's stack. Alternative considered: TypeScript, rejected for weaker document tooling.
 - **Strands Agents for the reviewers.** Each reviewer, the challenger and the question writer is a Strands agent returning structured output; the stage order stays in plain code. Chosen by the builder over plain Python and LangGraph. It runs locally, so the repeat run needs no cloud account.
-- **Strands' model connectors as the model layer.** Bedrock is the default; an OpenAI-compatible connector covers Gemini's free tier and local Ollama. This replaces the hand-written two-adapter layer decided earlier, since Strands already provides it.
-- **Distribution.** One Python package, run as `uvx tekti <input> <report>`, plus a Docker image.
+- **Strands' model connectors as the model layer.** The default is the vendors' own APIs (OpenAI, Anthropic, Google) with the user's keys; one OpenRouter key reaches the same three models through Strands' OpenAI-compatible connector, which also covers local Ollama. Bedrock remains as an option. This replaces the hand-written two-adapter layer decided earlier, since Strands already provides it.
+- **Distribution.** One Python package, run as `uv run tekti <input> <report>`, plus a Docker image.
 - **No web demo.** Decided by the builder: CLI plus a recorded run.
 
 **Data model**
@@ -57,7 +57,7 @@ The closed criterion list is what makes merging, voting and scoring against the 
 - **Untrusted input:** the document is data. It never reaches a model as instructions, no model output is trusted without the quote check, and the verdict is computed in code, so text inside a document cannot set the score.
 - **Secrets:** read from the environment only; `.env.example` in the root; nothing committed.
 - **Data leaving the machine:** document text goes to the chosen model provider. The local profile exists for cases where it must not.
-- **Spend:** a cap on calls and output size per run.
+- **Spend:** a cap on output tokens per call and on parallel calls; every call's tokens are recorded, so the run's cost can be estimated.
 
 **Other**
 
@@ -111,8 +111,8 @@ Decision rule: Same requirement count and quotes, keep the extractor; otherwise 
 
 ## Open questions
 
-- Which three families make the panel: settled by the first spike.
-- Who challenges whom, when a finding was raised by all three families: default is no challenge needed.
-- Whether the jury repeats the run with paid models: unknown; the README documents both the Bedrock and the free profile.
+- Which three families make the panel: settled. GPT (`gpt-6.1-terra`), Claude (`claude-haiku-5-5`) and Gemini (`gemini-4-carbon`), each through its vendor's API.
+- Who challenges whom, when a finding was raised by all three families: no challenge; two families or a rule confirm a finding.
+- Whether the jury repeats the run with paid models: they can, with their own keys; the README documents three vendor keys or one OpenRouter key, plus a free Gemini key and Bedrock.
 - Is "tekti" free as a package name: check before the first publish.
 - The gold set is unreviewed and written by one model; results on it should be presented with that caveat.

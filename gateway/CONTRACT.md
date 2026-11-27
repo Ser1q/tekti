@@ -1,5 +1,10 @@
 # Tekti gateway: contract
 
+> **Note, 27 November 2026:** the gateway is not deployed (stack deleted on 27 November 2026) and is not a
+> way for the jury to run Tekti. Within this file, "Sign-in with GitHub" below supersedes the `jury` token
+> described in "Authentication", "Limits" and "Client side": only the `owner` token remains. Without the
+> gateway, Tekti calls the vendors with their own keys or goes through OpenRouter (`OPENROUTER_API_KEY`).
+
 Owned by the main orchestrator. The gateway code and the Tekti client are built against this file.
 
 ## Purpose

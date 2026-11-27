@@ -1,5 +1,9 @@
 # Tekti gateway
 
+> **Status, 27 November 2026:** not deployed. The stack was deleted on 27 November 2026, and the gateway
+> is not a way for the jury to run Tekti: use your own vendor keys or an OpenRouter key (see the root
+> README). The code stays in the repository; this page describes how it works if someone deploys it.
+
 A thin HTTPS pass-through on AWS Lambda. It lets other people (the hackathon jury) run Tekti against
 your OpenAI, Anthropic and Google models without ever holding your vendor keys or any credential of
 yours. They prove who they are with their own GitHub account; you call it with your `owner` token.

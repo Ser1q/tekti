@@ -1,5 +1,10 @@
 # Tekti: hand-off brief for a second orchestrator
 
+> **Historical, 27 November 2026.** Internal work plan from 26 November; all packages are done. Superseded: the
+> 18:00 deadline; the P10 README brief (the README now documents vendor keys and OpenRouter, with the free
+> Gemini key and Bedrock as other options); the Bedrock models as defaults. Current defaults and the run
+> instructions are in README.md and `src/tekti/config.py`.
+
 Written 26 November 2026 by the main orchestrator (Claude Code session). Hard deadline for everything below: **27 November 2026, 18:00**, leaving the evening for integration and submission (organisers' cut-off is 23:59).
 
 ## What Tekti is

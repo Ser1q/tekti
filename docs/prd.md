@@ -1,6 +1,7 @@
 # PRD: Tekti, a requirements review board
 
 Status: draft, 26 November 2026. Owner: solo builder.
+Update, 27 November 2026: the web demo in section 6 was dropped (CLI only, see architecture.md); the jury can repeat the run with their own model keys (see README.md).
 First proof: BCC-HUB x MNU FinTech Hackathon submission, due 27 November 2026, 23:59.
 
 ## 1. Problem statement

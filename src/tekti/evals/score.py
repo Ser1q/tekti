@@ -189,7 +189,9 @@ def lookup_model_pricing(model: str) -> tuple[float, float] | None:
     for pattern, prices in MODEL_PRICING_PER_1M.items():
         if pattern in lowered:
             return prices
-    return None
+    from tekti.config import price_of  # the run-time price table covers the current default models
+
+    return price_of(model)
 
 
 def _combine_targets(targets: Sequence[Literal["anchor", "related", "both"]]) -> Literal["anchor", "related", "both"] | None:
