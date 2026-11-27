@@ -4,7 +4,7 @@ This file is the single source of truth for the data that moves between
 pipeline stages. Every stage is a function over these models and nothing else,
 so stages can be built and tested independently.
 
-Stage signatures (each lives in its own module; see handoff.md for owners):
+Stage signatures (each lives in its own module):
 
     ingest.load(path: Path) -> Document
     segment.split(doc: Document, cfg) -> list[Requirement]                  (LLM)
